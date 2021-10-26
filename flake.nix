@@ -24,12 +24,8 @@
         latest.rust-src
         rust-analyzer
       ]);
-    in rec {
-      defaultApp = flake-utils.lib.mkApp {
-        drv = defaultPackage;
-      };
-      defaultPackage = (with pkgs; stdenv.mkDerivation {
-        name = "windows_sdk";
+      sdk = (with pkgs; stdenv.mkDerivation {
+        name = "nix_windows_sdk";
         src = pkgs.fetchFromGitHub {
           owner = "mstorsjo";
           repo = "msvc-wine";
@@ -43,11 +39,11 @@
             rustc = rust;
             cargo = rust;
           }).buildRustPackage {
-            pname = "windows_sdk";
+            pname = "nix_windows_sdk";
             version = "0.1.0";
             src = ./.;
             doCheck = false;
-            cargoSha256 = "sha256-VaBu/oyNoPePSTtbBsrFBEhOtFx9C09GtIr1K9HqQpY=";
+            cargoSha256 = "sha256-Jq3kh7i/WLeT56FoZbV3kOTmgcXB6GsVOBPmqOFKpHY=";
           })
           (python39.withPackages(ps: with ps; [
             simplejson
@@ -62,12 +58,18 @@
         '';
         installPhase = ''
           mkdir $out
-          windows_sdk --source $TMP --destination $out
+          nix_windows_sdk --source $TMP --destination $out
         '';
       });
+    in rec {
+      defaultApp = flake-utils.lib.mkApp {
+        drv = defaultPackage;
+      };
+      defaultPackage = sdk;
       devShell = pkgs.mkShell {
         buildInputs = with pkgs; [
           cachix
+          sdk
           rust
         ];
       };
