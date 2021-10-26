@@ -1,5 +1,5 @@
 [package]
-name = "nix_windows_sdk"
+name = "windows_sdk"
 version = "0.0.0"
 edition = "2021"
 rust-version = "1.56"
@@ -7,11 +7,11 @@ publish = false
 license = "MIT"
 
 [lib]
-name = "nix_windows_sdk"
+name = "windows_sdk"
 path = "lib.rs"
 
 [[bin]]
-name = "nix_windows_sdk"
+name = "windows_sdk"
 path = "main.rs"
 
 [dependencies]

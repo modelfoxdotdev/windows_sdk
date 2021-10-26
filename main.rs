@@ -13,7 +13,7 @@ struct Args {
 fn main() {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
-    if let Err(e) = nix_windows_sdk::run(&args.source, &args.destination) {
+    if let Err(e) = windows_sdk::run(&args.source, &args.destination) {
         error!("{}", e);
     }
 }

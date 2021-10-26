@@ -25,7 +25,7 @@
         rust-analyzer
       ]);
       sdk = (with pkgs; stdenv.mkDerivation {
-        name = "nix_windows_sdk";
+        name = "windows_sdk";
         src = pkgs.fetchFromGitHub {
           owner = "mstorsjo";
           repo = "msvc-wine";
@@ -39,7 +39,7 @@
             rustc = rust;
             cargo = rust;
           }).buildRustPackage {
-            pname = "nix_windows_sdk";
+            pname = "windows_sdk";
             version = "0.1.0";
             src = ./.;
             doCheck = false;
@@ -58,7 +58,7 @@
         '';
         installPhase = ''
           mkdir $out
-          nix_windows_sdk --source $TMP --destination $out
+          windows_sdk --source $TMP --destination $out
         '';
       });
     in rec {
@@ -68,8 +68,6 @@
       defaultPackage = sdk;
       devShell = pkgs.mkShell {
         buildInputs = with pkgs; [
-          cachix
-          sdk
           rust
         ];
       };
