@@ -126,7 +126,7 @@ fn read_all_headers(toplevel: impl AsRef<Path>) -> io::Result<HashMap<String, Pa
 }
 
 /// Search files for includes with case issues, create any missing symlinks.
-fn create_included_header_symlinks(
+fn symlink_case_mismatches(
     toplevel: impl AsRef<Path>,
     headers: HashMap<String, PathBuf>,
 ) -> io::Result<()> {
@@ -190,16 +190,6 @@ fn create_included_header_symlinks(
             }
         }
     }
-    Ok(())
-}
-
-/// Resolve case issues by symlinking.
-fn symlink_case_mismatches(
-    toplevel: impl AsRef<Path>,
-    headers: HashMap<String, PathBuf>,
-) -> io::Result<()> {
-    let toplevel = toplevel.as_ref();
-    create_included_header_symlinks(toplevel, headers)?;
     Ok(())
 }
 
