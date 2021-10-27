@@ -51,7 +51,7 @@
           ]))
         ];
         SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
-        outputHash = "sha256-QblzM0R/c1tNrrOzFb4i/kiA1fhtrwOOy2XJlha+hS0=";
+        outputHash = "sha256-5Nj8KusNIvq3khwUgiWVsBZ5RfMtYC/11i9E7iYS/yE=";
         outputHashMode = "recursive";
         buildPhase = ''
           python vsdownload.py --accept-license --dest $TMP Microsoft.VisualStudio.VC.Llvm.Clang Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.Windows10SDK.19041

@@ -125,12 +125,39 @@ fn read_all_headers(toplevel: impl AsRef<Path>) -> io::Result<HashMap<String, Pa
     Ok(headers)
 }
 
+/// Create a symlink to any non-lowercase filename in the path
+fn create_lowercase_symlinks(toplevel: impl AsRef<Path>) -> io::Result<()> {
+    let toplevel = toplevel.as_ref();
+    for entry in WalkDir::new(toplevel) {
+        let entry = entry?;
+        let ftype = entry.file_type();
+        if ftype.is_file() {
+            let orig = entry.file_name();
+            let orig = orig.to_str().expect("Filename contained invalid UTF-8");
+            let lowered = orig.to_lowercase();
+            if orig != lowered {
+                let source = fs::canonicalize(entry.path())?;
+                let mut target = source.clone();
+                target.pop();
+                target.push(lowered);
+                symlink(&source, &target)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Search files for includes with case issues, create any missing symlinks.
 fn symlink_case_mismatches(
     toplevel: impl AsRef<Path>,
     headers: HashMap<String, PathBuf>,
 ) -> io::Result<()> {
     let toplevel = toplevel.as_ref();
+
+    let sdk = toplevel.join("sdk");
+    for subdir in &[sdk.join("include").join("um"), sdk.join("lib").join("x64")] {
+        create_lowercase_symlinks(subdir)?;
+    }
 
     let regex = Regex::new(r#"#include\s+(?:"|<)([^">]+)(?:"|>)?"#).unwrap();
 
