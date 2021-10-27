@@ -1,6 +1,5 @@
 use clap::Parser;
 use std::path::PathBuf;
-use tracing::error;
 
 #[derive(Parser)]
 struct Args {
@@ -11,9 +10,8 @@ struct Args {
 }
 
 fn main() {
-    tracing_subscriber::fmt::init();
     let args = Args::parse();
     if let Err(e) = windows_sdk::run(&args.source, &args.destination) {
-        error!("{}", e);
+        eprintln!("{}", e);
     }
 }

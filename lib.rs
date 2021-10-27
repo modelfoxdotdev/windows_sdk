@@ -3,19 +3,13 @@ use std::{
     collections::{HashMap, HashSet},
     fs, io,
     os::unix::fs::symlink,
-    path::Path,
+    path::{Path, PathBuf},
 };
-use tracing::{event, Level};
+use walkdir::WalkDir;
 
 /// Build the `toplevel/{crt,sdk}/{lib,include}/` structure, with some extras in the `crt` path.
 fn build_structure(toplevel: impl AsRef<Path>) -> io::Result<()> {
     let toplevel = toplevel.as_ref();
-    event!(Level::INFO, "Building destination structure");
-    event!(
-        Level::DEBUG,
-        "Erasing and recreating {}",
-        toplevel.display()
-    );
     if toplevel.exists() {
         fs::remove_dir_all(toplevel)?;
     }
@@ -25,17 +19,14 @@ fn build_structure(toplevel: impl AsRef<Path>) -> io::Result<()> {
         let inner_levels = ["lib", "include"];
         for inner in inner_levels {
             let d = toplevel.join(dir).join(inner);
-            event!(Level::DEBUG, "Creating {}", d.display());
             fs::create_dir_all(&d)?;
             // TODO - do we need to do this here?  copy_contents() might be able to handle it
             if dir == "crt" {
                 if inner == "lib" {
                     let p = d.join("x64");
-                    event!(Level::DEBUG, "Creating {}", p.display());
                     fs::create_dir(p)?;
                 } else if inner == "include" {
                     let p = d.join("clang");
-                    event!(Level::DEBUG, "Creating {}", p.display());
                     fs::create_dir(p)?;
                 }
             }
@@ -48,20 +39,11 @@ fn build_structure(toplevel: impl AsRef<Path>) -> io::Result<()> {
 fn copy_dir_all(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io::Result<()> {
     let source = source.as_ref();
     let destination = destination.as_ref();
-    event!(
-        Level::DEBUG,
-        "Copying {} to {}",
-        source.display(),
-        destination.display()
-    );
     fs::create_dir_all(destination)?;
-    let entries = fs::read_dir(source)?;
-    for entry in entries {
+    for entry in WalkDir::new(source) {
         let entry = entry?;
-        let ftype = entry.file_type()?;
-        if ftype.is_dir() {
-            copy_dir_all(entry.path(), destination.join(entry.file_name()))?;
-        } else {
+        let ftype = entry.file_type();
+        if ftype.is_file() {
             fs::copy(entry.path(), destination.join(entry.file_name()))?;
         }
     }
@@ -70,8 +52,6 @@ fn copy_dir_all(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io::
 
 /// Copy the necessary folders from the source SDK directory tree to our tailored destination.
 fn copy_contents(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io::Result<()> {
-    event!(Level::INFO, "Copying required contents...");
-
     // Set up reused paths
     let source = source.as_ref();
     let destination = destination.as_ref();
@@ -109,7 +89,9 @@ fn copy_contents(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io:
     let sdk_shared_dest = sdk_includes_dest.join("shared");
     let sdk_ucrt_dest = sdk_includes_dest.join("ucrt");
     let sdk_um_dest = sdk_includes_dest.join("um");
-    let sdk_libs_dest = destination.join("sdk").join("lib").join("x64");
+    let sdk_libs_dest = |subdir: &str| destination.join("sdk").join("lib").join(subdir).join("x64");
+    let sdk_ucrt_libs_dest = sdk_libs_dest("ucrt");
+    let sdk_um_libs_dest = sdk_libs_dest("um");
     let crt = destination.join("crt");
     let crt_includes = crt.join("include");
     let crt_clang_compat = crt_includes.join("clang");
@@ -121,8 +103,8 @@ fn copy_contents(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io:
         (&sdk_um, &sdk_um_dest),
         (&vc_tools_includes, &crt_includes),
         (&vc_tools_clang_compat, &crt_clang_compat),
-        (&sdk_ucrt_libs, &sdk_libs_dest),
-        (&sdk_um_libs, &sdk_libs_dest),
+        (&sdk_ucrt_libs, &sdk_ucrt_libs_dest),
+        (&sdk_um_libs, &sdk_um_libs_dest),
         (&vc_tools_libs, &crt_libs_dest),
     ];
     for (source, target) in tasks {
@@ -137,55 +119,45 @@ fn copy_contents(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io:
 fn debug_symlink(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io::Result<()> {
     let source = source.as_ref();
     let destination = destination.as_ref();
-    event!(
-        Level::DEBUG,
-        "Linking {} to {}",
-        source.display(),
-        destination.display()
-    );
     symlink(source, destination)?;
     Ok(())
 }
 
-/// Create a symlink to any non-lowercase filename in the path
-fn create_lowercase_symlinks(toplevel: impl AsRef<Path>) -> io::Result<()> {
+// Crawl through every include dir, add every single header to a big map.
+fn read_all_headers(toplevel: impl AsRef<Path>) -> io::Result<HashMap<String, PathBuf>> {
     let toplevel = toplevel.as_ref();
-    event!(Level::DEBUG, "Building links in {}", toplevel.display());
-    let entries = fs::read_dir(toplevel)?;
-    for entry in entries {
+    let mut headers = HashMap::new();
+
+    for entry in WalkDir::new(toplevel) {
         let entry = entry?;
-        let ftype = entry.file_type()?;
+        let ftype = entry.file_type();
         if ftype.is_file() {
-            let orig = entry.file_name();
-            let orig = orig.to_str().expect("Filename contained invalid UTF-8");
-            let lowered = orig.to_lowercase();
-            if orig != lowered {
-                let source = entry.path();
-                let mut target = source.clone();
-                target.pop();
-                target.push(lowered);
-                debug_symlink(&source, &target)?;
+            let file_name = entry.file_name();
+            let file_name = file_name.to_str().unwrap().to_owned();
+            let ext = file_name.split('.').nth(1).unwrap_or("_");
+            if ext == "h" {
+                headers.insert(file_name, entry.path().to_owned());
             }
         }
     }
-    Ok(())
+
+    Ok(headers)
 }
 
 /// Search files for includes with case issues, create any missing symlinks.
-fn create_included_header_symlinks(toplevel: impl AsRef<Path>) -> io::Result<()> {
+fn create_included_header_symlinks(
+    toplevel: impl AsRef<Path>,
+    headers: HashMap<String, PathBuf>,
+) -> io::Result<()> {
     let toplevel = toplevel.as_ref();
 
     let regex = Regex::new(r#"#include\s+(?:"|<)([^">]+)(?:"|>)?"#).unwrap();
 
     let mut expected = HashSet::new();
-    let mut headers = HashMap::new();
-    let entries = fs::read_dir(toplevel)?;
-    for entry in entries {
+    for entry in WalkDir::new(toplevel) {
         let entry = entry?;
-        let ftype = entry.file_type()?;
+        let ftype = entry.file_type();
         if ftype.is_file() {
-            let file_name = entry.file_name();
-            headers.insert(file_name.to_str().unwrap().to_owned(), entry.path());
             let contents = fs::read(entry.path())?;
             for caps in regex.captures_iter(&contents) {
                 let name =
@@ -215,7 +187,7 @@ fn create_included_header_symlinks(toplevel: impl AsRef<Path>) -> io::Result<()>
                     for (possible_header, path) in &headers {
                         let lowered = possible_header.to_lowercase();
                         if lowered == name {
-                            let source = path;
+                            let source = fs::canonicalize(path)?;
                             let mut target = source.clone();
                             target.pop();
                             target.push(name);
@@ -227,7 +199,7 @@ fn create_included_header_symlinks(toplevel: impl AsRef<Path>) -> io::Result<()>
                     //the headers should have a lowercase verison.  Build symlink to expected.
                     let lowered = name.to_lowercase();
                     if let Some(needle) = headers.get(&lowered) {
-                        let source = needle.clone();
+                        let source = fs::canonicalize(needle)?;
                         let mut target = source.clone();
                         target.pop();
                         target.push(name);
@@ -241,29 +213,24 @@ fn create_included_header_symlinks(toplevel: impl AsRef<Path>) -> io::Result<()>
 }
 
 /// Resolve case issues by symlinking.
-fn symlink_case_mismatches(toplevel: impl AsRef<Path>) -> io::Result<()> {
-    event!(Level::INFO, "Resolving case mismatches");
+fn symlink_case_mismatches(
+    toplevel: impl AsRef<Path>,
+    headers: HashMap<String, PathBuf>,
+) -> io::Result<()> {
     let toplevel = toplevel.as_ref();
-
-    let sdk = toplevel.join("sdk");
-    let sdk_includes = sdk.join("include");
-
-    for subdir in &[sdk_includes.join("um"), sdk.join("lib").join("x64")] {
-        create_lowercase_symlinks(subdir)?;
-    }
-    create_included_header_symlinks(sdk_includes.join("shared"))?;
-
+    create_included_header_symlinks(toplevel, headers)?;
     Ok(())
 }
 
 /// Build a tailored MSVC SDK from the full downloaded tree.
 pub fn run(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io::Result<()> {
+    println!("Processing sdk...");
     let source = source.as_ref();
     let destination = destination.as_ref();
-    event!(Level::INFO, "Processing MSVC SDK...");
     build_structure(destination)?;
     copy_contents(source, destination)?;
-    symlink_case_mismatches(destination)?;
-    event!(Level::INFO, "All done!");
+    let headers = read_all_headers(destination)?;
+    symlink_case_mismatches(destination, headers)?;
+    println!("All done!");
     Ok(())
 }
