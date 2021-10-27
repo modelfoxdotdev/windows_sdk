@@ -7,7 +7,7 @@ use std::{
 };
 use walkdir::WalkDir;
 
-/// Build the `toplevel/{crt,sdk}/{lib,include}/` structure, with some extras in the `crt` path.
+/// Build the `toplevel/{crt,sdk}/{lib,include}/` structure
 fn build_structure(toplevel: impl AsRef<Path>) -> io::Result<()> {
     let toplevel = toplevel.as_ref();
     if toplevel.exists() {
@@ -20,16 +20,6 @@ fn build_structure(toplevel: impl AsRef<Path>) -> io::Result<()> {
         for inner in inner_levels {
             let d = toplevel.join(dir).join(inner);
             fs::create_dir_all(&d)?;
-            // TODO - do we need to do this here?  copy_contents() might be able to handle it
-            if dir == "crt" {
-                if inner == "lib" {
-                    let p = d.join("x64");
-                    fs::create_dir(p)?;
-                } else if inner == "include" {
-                    let p = d.join("clang");
-                    fs::create_dir(p)?;
-                }
-            }
         }
     }
     Ok(())
@@ -114,16 +104,7 @@ fn copy_contents(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io:
     Ok(())
 }
 
-/// Create a symlink from source to target, emitting a message when RUST_LOG=debug is set.
-#[inline]
-fn debug_symlink(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io::Result<()> {
-    let source = source.as_ref();
-    let destination = destination.as_ref();
-    symlink(source, destination)?;
-    Ok(())
-}
-
-// Crawl through every include dir, add every single header to a big map.
+/// Crawl through every include dir, add every single header to a big map.
 fn read_all_headers(toplevel: impl AsRef<Path>) -> io::Result<HashMap<String, PathBuf>> {
     let toplevel = toplevel.as_ref();
     let mut headers = HashMap::new();
@@ -191,7 +172,7 @@ fn create_included_header_symlinks(
                             let mut target = source.clone();
                             target.pop();
                             target.push(name);
-                            debug_symlink(source, target)?;
+                            symlink(source, target)?;
                             break;
                         }
                     }
@@ -203,7 +184,7 @@ fn create_included_header_symlinks(
                         let mut target = source.clone();
                         target.pop();
                         target.push(name);
-                        debug_symlink(source, target)?;
+                        symlink(source, target)?;
                     }
                 }
             }
@@ -229,8 +210,7 @@ pub fn run(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io::Resul
     let destination = destination.as_ref();
     build_structure(destination)?;
     copy_contents(source, destination)?;
-    let headers = read_all_headers(destination)?;
-    symlink_case_mismatches(destination, headers)?;
+    symlink_case_mismatches(destination, read_all_headers(destination)?)?;
     println!("All done!");
     Ok(())
 }
