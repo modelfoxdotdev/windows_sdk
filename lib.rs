@@ -155,7 +155,13 @@ fn symlink_case_mismatches(
     let toplevel = toplevel.as_ref();
 
     let sdk = toplevel.join("sdk");
-    for subdir in &[sdk.join("include").join("um"), sdk.join("lib").join("x64")] {
+    let sdk_lib = sdk.join("lib");
+    let sdk_lib_dir = |subdir: &str| sdk_lib.join(subdir).join("x64");
+    for subdir in &[
+        sdk.join("include").join("um"),
+        sdk_lib_dir("ucrt"),
+        sdk_lib_dir("um"),
+    ] {
         create_lowercase_symlinks(subdir)?;
     }
 
@@ -199,7 +205,9 @@ fn symlink_case_mismatches(
                             let mut target = source.clone();
                             target.pop();
                             target.push(name);
-                            symlink(source, target)?;
+                            if !target.exists() {
+                                symlink(source, target)?;
+                            }
                             break;
                         }
                     }
@@ -211,7 +219,9 @@ fn symlink_case_mismatches(
                         let mut target = source.clone();
                         target.pop();
                         target.push(name);
-                        symlink(source, target)?;
+                        if !target.exists() {
+                            symlink(source, target)?;
+                        }
                     }
                 }
             }
