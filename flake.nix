@@ -43,7 +43,7 @@
             version = "0.1.0";
             src = ./.;
             doCheck = false;
-            cargoSha256 = "sha256-JClfnU92hnqRBcB8s/VNMRgeWgxR1g4vVFktbmr6/mQ=";
+            cargoSha256 = "sha256-mayOyMmidV7Bn+0caf2+shpAV7ytfz1E7d02IF+PdM0";
           })
           (python39.withPackages(ps: with ps; [
             simplejson
@@ -51,7 +51,7 @@
           ]))
         ];
         SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
-        outputHash = "sha256-kAe4IipcYZF4drXm2FK/xizKgi+dzcXKj2pArWZdznY=";
+        outputHash = "sha256-I4UGDcrtmX/1TAQz89peXsqoetZmCM+1b3XYqexv/VA=";
         outputHashMode = "recursive";
         buildPhase = ''
           python vsdownload.py --accept-license --dest $TMP Microsoft.VisualStudio.VC.Llvm.Clang Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.Windows10SDK.19041

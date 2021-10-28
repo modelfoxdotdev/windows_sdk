@@ -16,6 +16,5 @@ path = "main.rs"
 
 [dependencies]
 clap = { version = "3.0.0-beta.5", features = ["color"] }
-duct = "0.13"
 regex = "1.5"
 walkdir = "2"
