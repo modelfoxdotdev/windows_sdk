@@ -1,3 +1,4 @@
+use duct::cmd;
 use regex::bytes::Regex;
 use std::{
     collections::{HashMap, HashSet},
@@ -20,6 +21,13 @@ fn build_structure(toplevel: impl AsRef<Path>) -> io::Result<()> {
         for inner in inner_levels {
             let d = toplevel.join(dir).join(inner);
             fs::create_dir_all(&d)?;
+            if dir == "crt" {
+                if inner == "lib" {
+                    fs::create_dir(d.join("x64"))?;
+                } else {
+                    fs::create_dir(d.join("clang"))?;
+                }
+            }
         }
     }
     Ok(())
@@ -40,8 +48,35 @@ fn copy_dir_all(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io::
     Ok(())
 }
 
+/// Recursively copy a directory and all contents actually using cp -r
+fn copy_dir_all_shell(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io::Result<()> {
+    let source = fs::canonicalize(source)?;
+    let destination = fs::canonicalize(destination)?;
+    cmd!("cp", "-r", source, destination).run()?;
+    Ok(())
+}
+
+/// Recursively copy all contents of a directory actually using cp -r
+fn copy_dir_contents_shell(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+) -> io::Result<()> {
+    let source = fs::canonicalize(source)?;
+    let destination = fs::canonicalize(destination)?;
+    // use bash to splat :(
+    let cp = format!("cp -r {}/* {}", source.display(), destination.display());
+    cmd!("bash", "-c", cp).run()?;
+    Ok(())
+}
+
+/// Recursively copy all contents of a directory using cp -r
+
 /// Copy the necessary folders from the source SDK directory tree to our tailored destination.
-fn copy_contents(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io::Result<()> {
+fn copy_contents(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    use_std: bool,
+) -> io::Result<()> {
     // Set up reused paths
     let source = source.as_ref();
     let destination = destination.as_ref();
@@ -79,26 +114,50 @@ fn copy_contents(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io:
     let sdk_shared_dest = sdk_includes_dest.join("shared");
     let sdk_ucrt_dest = sdk_includes_dest.join("ucrt");
     let sdk_um_dest = sdk_includes_dest.join("um");
+    let collective_sdk_libs_dest = destination.join("sdk").join("lib");
     let sdk_libs_dest = |subdir: &str| destination.join("sdk").join("lib").join(subdir).join("x64");
     let sdk_ucrt_libs_dest = sdk_libs_dest("ucrt");
     let sdk_um_libs_dest = sdk_libs_dest("um");
     let crt = destination.join("crt");
     let crt_includes = crt.join("include");
     let crt_clang_compat = crt_includes.join("clang");
+    let crt_clang_compat_include = crt_clang_compat.join("include");
     let crt_libs_dest = crt.join("lib").join("x64");
 
-    let tasks = [
-        (&sdk_shared, &sdk_shared_dest),
-        (&sdk_ucrt, &sdk_ucrt_dest),
-        (&sdk_um, &sdk_um_dest),
-        (&vc_tools_includes, &crt_includes),
-        (&vc_tools_clang_compat, &crt_clang_compat),
-        (&sdk_ucrt_libs, &sdk_ucrt_libs_dest),
-        (&sdk_um_libs, &sdk_um_libs_dest),
-        (&vc_tools_libs, &crt_libs_dest),
-    ];
-    for (source, target) in tasks {
-        copy_dir_all(source, target)?;
+    if use_std {
+        // NOTE - BROKEN
+        let tasks = [
+            (&sdk_shared, &sdk_shared_dest),
+            (&sdk_ucrt, &sdk_ucrt_dest),
+            (&sdk_um, &sdk_um_dest),
+            (&vc_tools_clang_compat, &crt_clang_compat_include),
+            (&sdk_ucrt_libs, &sdk_ucrt_libs_dest),
+            (&sdk_um_libs, &sdk_um_libs_dest),
+            (&vc_tools_includes, &crt_includes),
+            (&vc_tools_libs, &crt_libs_dest),
+        ];
+        for (source, target) in tasks {
+            copy_dir_all(source, target)?;
+        }
+    } else {
+        let full_copy_tasks = [
+            (&sdk_shared, &sdk_includes_dest),
+            (&sdk_ucrt, &sdk_includes_dest),
+            (&sdk_um, &sdk_includes_dest),
+            (&vc_tools_clang_compat, &crt_clang_compat),
+            (&sdk_ucrt_libs, &collective_sdk_libs_dest),
+            (&sdk_um_libs, &collective_sdk_libs_dest),
+        ];
+        for (source, target) in full_copy_tasks {
+            copy_dir_all_shell(source, target)?;
+        }
+        let contents_copy_tasks = [
+            (&vc_tools_includes, &crt_includes),
+            (&vc_tools_libs, &crt_libs_dest),
+        ];
+        for (source, target) in contents_copy_tasks {
+            copy_dir_contents_shell(source, target)?;
+        }
     }
 
     Ok(())
@@ -155,13 +214,8 @@ fn symlink_case_mismatches(
     let toplevel = toplevel.as_ref();
 
     let sdk = toplevel.join("sdk");
-    let sdk_lib = sdk.join("lib");
-    let sdk_lib_dir = |subdir: &str| sdk_lib.join(subdir).join("x64");
-    for subdir in &[
-        sdk.join("include").join("um"),
-        sdk_lib_dir("ucrt"),
-        sdk_lib_dir("um"),
-    ] {
+    let sdk_lib = sdk.join("lib").join("x64");
+    for subdir in &[sdk.join("include").join("um"), sdk_lib] {
         create_lowercase_symlinks(subdir)?;
     }
 
@@ -231,12 +285,16 @@ fn symlink_case_mismatches(
 }
 
 /// Build a tailored MSVC SDK from the full downloaded tree.
-pub fn run(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io::Result<()> {
+pub fn run(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    use_std: bool,
+) -> io::Result<()> {
     println!("Processing sdk...");
     let source = source.as_ref();
     let destination = destination.as_ref();
     build_structure(destination)?;
-    copy_contents(source, destination)?;
+    copy_contents(source, destination, use_std)?;
     symlink_case_mismatches(destination, read_all_headers(destination)?)?;
     println!("All done!");
     Ok(())
