@@ -108,12 +108,12 @@ fn copy_contents(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io:
 	let sdk_shared_dst = sdk_includes_dst.join("shared");
 	let sdk_ucrt_dst = sdk_includes_dst.join("ucrt");
 	let sdk_um_dst = sdk_includes_dst.join("um");
-	let sdk_libs_fn = |subdir: &str| destination.join("sdk").join("lib").join(subdir).join("x64");
+	let sdk_libs_fn = |subdir: &str| destination.join("sdk").join("lib").join("x64").join(subdir);
 	let sdk_ucrt_libs_dst = sdk_libs_fn("ucrt");
 	let sdk_um_libs_dst = sdk_libs_fn("um");
 	let crt_dst = destination.join("crt");
 	let crt_includes_dst = crt_dst.join("include");
-	let crt_clang_compat_dst = crt_includes_dst.join("clang").join("include");
+	let crt_clang_compat_dst = destination.join("clang").join("include");
 	let crt_libs_dst = crt_dst.join("lib").join("x64");
 
 	let tasks = [
