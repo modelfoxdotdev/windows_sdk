@@ -114,7 +114,7 @@ fn copy_contents(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io:
 	let crt_dst = destination.join("crt");
 	let crt_includes_dst = crt_dst.join("include");
 	let crt_clang_compat_dst = destination.join("clang").join("include");
-	let crt_libs_dst = crt_dst.join("lib").join("x64");
+	let crt_libs_dst = destination.join("clang").join("lib").join("x64");
 
 	let tasks = [
 		(&sdk_shared_src, &sdk_shared_dst),
