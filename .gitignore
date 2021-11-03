@@ -1,3 +1,7 @@
+/.cache/
+/.destination/
 /.direnv/
-result
+/.result/
+/result
 /target/
+/vsdownload.py

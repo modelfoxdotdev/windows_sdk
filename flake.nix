@@ -16,15 +16,25 @@
         inherit system;
       };
       rust = (with fenix.packages.${system}; combine [
-        latest.rustc
         latest.cargo
         latest.clippy-preview
-        latest.rustfmt-preview
-        latest.rust-std
         latest.rust-src
+        latest.rust-std
+        latest.rustc
+        latest.rustfmt-preview
         rust-analyzer
       ]);
-      sdk = (with pkgs; stdenv.mkDerivation {
+      buildInputs = with pkgs; [
+        cacert
+        msitools
+        (python39.withPackages(ps: with ps; [
+          simplejson
+          six
+        ]))
+        rust
+      ];
+    in rec {
+      defaultPackage = (with pkgs; stdenv.mkDerivation {
         name = "windows_sdk";
         src = pkgs.fetchFromGitHub {
           owner = "mstorsjo";
@@ -32,44 +42,20 @@
           rev = "12f63eca95dccbe94ee1802209fb0c68c529628d";
           hash = "sha256-BjX2EtYdz9vw1m9gqyOekcNLeYLryxwNT8L94/NeSWU=";
         };
-        buildInputs = [
-          cacert
-          msitools
-          ((pkgs.makeRustPlatform {
-            rustc = rust;
-            cargo = rust;
-          }).buildRustPackage {
-            pname = "windows_sdk";
-            version = "0.1.0";
-            src = ./.;
-            doCheck = false;
-            cargoSha256 = "sha256-mayOyMmidV7Bn+0caf2+shpAV7ytfz1E7d02IF+PdM0";
-          })
-          (python39.withPackages(ps: with ps; [
-            simplejson
-            six
-          ]))
-        ];
+        inherit buildInputs;
         SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
-        outputHash = "sha256-I4UGDcrtmX/1TAQz89peXsqoetZmCM+1b3XYqexv/VA=";
+        outputHash = "sha256-I4UGDcrtmX/1TAQz89peXsroetZmCM+1b3XYqexv/VB=";
         outputHashMode = "recursive";
         buildPhase = ''
           python vsdownload.py --accept-license --dest $TMP Microsoft.VisualStudio.VC.Llvm.Clang Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.Windows10SDK.19041
         '';
         installPhase = ''
           mkdir $out
-          windows_sdk --source $TMP --destination $out
+          cargo run -- --source $TMP --destination $out
         '';
       });
-    in rec {
-      defaultApp = flake-utils.lib.mkApp {
-        drv = defaultPackage;
-      };
-      defaultPackage = sdk;
       devShell = pkgs.mkShell {
-        buildInputs = with pkgs; [
-          rust
-        ];
+        inherit buildInputs;
       };
     }
   );
