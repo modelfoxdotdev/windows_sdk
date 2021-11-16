@@ -41,7 +41,7 @@
           ]))
         ];
         SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
-        outputHash = "sha256-J30NavUAwqdzqfMHP0zhmiMc6NKHnqC7pyud7FmB6Io=";
+        outputHash = "sha256-dUGaoct0QLyqUm2v37HXFJGk0MCIshXpxfYw9Fw3rl8=";
         outputHashMode = "recursive";
         installPhase = ''
           mkdir $out && python vsdownload.py --accept-license --dest $out Microsoft.VisualStudio.VC.Llvm.Clang Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.Windows10SDK.19041
@@ -63,7 +63,8 @@
               doCheck = false;
               cargoSha256 = "sha256-IoyYZuRoTDexXWTlI46KufQyJ5hSvZo2H0YdAeZkTOM=";
           })
-          sdk ];
+          sdk 
+        ];
         installPhase = ''
           mkdir $out
           windows_sdk --source ${sdk} --destination $out
