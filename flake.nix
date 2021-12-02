@@ -35,7 +35,7 @@
         ];
         cargoSha256 = "sha256-XYEMnL8+EdIDvH6GaRZO+VeDB3IoRW6JQn/odXrQnxg=";
       };
-      download = (with pkgs; stdenv.mkDerivation {
+      download = pkgs.stdenv.mkDerivation {
         name = "download";
         src = pkgs.fetchFromGitHub {
           owner = "mstorsjo";
@@ -43,7 +43,7 @@
           rev = "12f63eca95dccbe94ee1802209fb0c68c529628d";
           hash = "sha256-BjX2EtYdz9vw1m9gqyOekcNLeYLryxwNT8L94/NeSWU=";
         };
-        buildInputs = [
+        buildInputs = with pkgs; [
           cacert
           msitools
           (python39.withPackages(ps: with ps; [
@@ -56,7 +56,7 @@
         '';
         outputHashMode = "recursive";
         outputHash = "sha256-dUGaoct0QLyqUm2v37HXFJGk0MCIshXpxfYw9Fw3rl8=";
-      });
+      };
       windows_sdk = pkgs.runCommand "windows_sdk" {
         buildInputs = [
           cli
