@@ -15,17 +15,28 @@
       pkgs = import nixpkgs {
         inherit system;
       };
-      rust = (with fenix.packages.${system}; combine [
-        latest.cargo
-        latest.clippy-preview
-        latest.rust-src
-        latest.rust-std
-        latest.rustc
-        latest.rustfmt-preview
-        rust-analyzer
+      rust = with fenix.packages.${system}; combine (with stable; [
+        cargo
+        clippy-preview
+        rust-src
+        rust-std
+        rustc
+        rustfmt-preview
       ]);
-      sdk = (with pkgs; stdenv.mkDerivation {
-        name = "sdk";
+      cli = (pkgs.makeRustPlatform {
+        rustc = rust;
+        cargo = rust;
+      }).buildRustPackage {
+        name = "cli";
+        src = ./.;
+        doCheck = false;
+        nativeBuildInputs = with pkgs; [
+          libiconv
+        ];
+        cargoSha256 = "sha256-XYEMnL8+EdIDvH6GaRZO+VeDB3IoRW6JQn/odXrQnxg=";
+      };
+      download = (with pkgs; stdenv.mkDerivation {
+        name = "download";
         src = pkgs.fetchFromGitHub {
           owner = "mstorsjo";
           repo = "msvc-wine";
@@ -40,38 +51,27 @@
             six
           ]))
         ];
-        SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
-        outputHash = "sha256-dUGaoct0QLyqUm2v37HXFJGk0MCIshXpxfYw9Fw3rl8=";
-        outputHashMode = "recursive";
         installPhase = ''
           mkdir $out && python vsdownload.py --accept-license --dest $out Microsoft.VisualStudio.VC.Llvm.Clang Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.Windows10SDK.19041
         '';
+        outputHashMode = "recursive";
+        outputHash = "sha256-dUGaoct0QLyqUm2v37HXFJGk0MCIshXpxfYw9Fw3rl8=";
       });
-    in rec {
-      defaultPackage = (with pkgs; stdenv.mkDerivation {
-        pname = "windows_sdk";
-        version = "0.0.0";
-        src = ./.;
+      windows_sdk = pkgs.runCommand "windows_sdk" {
         buildInputs = [
-          ((pkgs.makeRustPlatform {
-            rustc = rust;
-            cargo = rust;
-          }).buildRustPackage {
-              pname = "windows_sdk";
-              version = "0.0.0";
-              src = ./.;
-              doCheck = false;
-              cargoSha256 = "sha256-IoyYZuRoTDexXWTlI46KufQyJ5hSvZo2H0YdAeZkTOM=";
-          })
-          sdk 
+          cli
+          download
         ];
-        installPhase = ''
-          mkdir $out
-          windows_sdk --source ${sdk} --destination $out
-        '';
-      });
+      } ''
+        mkdir $out
+        windows_sdk --source ${download} --destination $out
+      '';
+    in rec {
+      defaultPackage = windows_sdk;
       devShell = pkgs.mkShell {
-        buildInputs = [ rust ];
+        buildInputs = [
+          rust
+        ];
       };
     }
   );

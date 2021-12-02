@@ -1,7 +1,3 @@
-/.cache/
-/.destination/
 /.direnv/
-/.result/
 /result
 /target/
-/vsdownload.py
