@@ -38,7 +38,7 @@
         propagatedBuildInputs = with pkgs; [
           msitools
         ];
-        cargoSha256 = "sha256-+OCzlAVr3LhBQAiH7nLWSBWLEbajkqSV380+TUunnhE=";
+        cargoSha256 = "sha256-kC0g3bAhHN+TmTTj1CZWBk9PmYpJTBzcd/B1zafS64E=";
       };
       devShell = pkgs.mkShell {
         buildInputs = with pkgs; [
