@@ -1,0 +1,1 @@
+xh -F https://aka.ms/vs/16/release/channel | jq -r '.channelItems[0].payloads[0].url'

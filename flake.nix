@@ -10,12 +10,12 @@
       url = "github:nix-community/fenix";
     };
   };
-  outputs = { nixpkgs, flake-utils, fenix, ... }: flake-utils.lib.eachDefaultSystem (system:
+  outputs = inputs: inputs.flake-utils.lib.eachDefaultSystem (system:
     let
-      pkgs = import nixpkgs {
+      pkgs = import inputs.nixpkgs {
         inherit system;
       };
-      rust = with fenix.packages.${system}; combine (with stable; [
+      rust = with inputs.fenix.packages.${system}; combine (with stable; [
         cargo
         clippy-preview
         rust-src
@@ -23,54 +23,30 @@
         rustc
         rustfmt-preview
       ]);
-      cli = (pkgs.makeRustPlatform {
+    in
+    rec {
+      defaultPackage = (pkgs.makeRustPlatform {
         rustc = rust;
         cargo = rust;
       }).buildRustPackage {
-        name = "cli";
+        name = "windows_sdk";
         src = ./.;
         doCheck = false;
         nativeBuildInputs = with pkgs; [
           libiconv
         ];
-        cargoSha256 = "sha256-XYEMnL8+EdIDvH6GaRZO+VeDB3IoRW6JQn/odXrQnxg=";
-      };
-      download = pkgs.stdenv.mkDerivation {
-        name = "download";
-        src = pkgs.fetchFromGitHub {
-          owner = "mstorsjo";
-          repo = "msvc-wine";
-          rev = "12f63eca95dccbe94ee1802209fb0c68c529628d";
-          hash = "sha256-BjX2EtYdz9vw1m9gqyOekcNLeYLryxwNT8L94/NeSWU=";
-        };
-        buildInputs = with pkgs; [
-          cacert
+        propagatedBuildInputs = with pkgs; [
           msitools
-          (python39.withPackages(ps: with ps; [
-            simplejson
-            six
-          ]))
         ];
-        installPhase = ''
-          mkdir $out && python vsdownload.py --accept-license --dest $out Microsoft.VisualStudio.VC.Llvm.Clang Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.Windows10SDK.19041
-        '';
-        outputHashMode = "recursive";
-        outputHash = "sha256-dUGaoct0QLyqUm2v37HXFJGk0MCIshXpxfYw9Fw3rl8=";
+        cargoSha256 = "sha256-+OCzlAVr3LhBQAiH7nLWSBWLEbajkqSV380+TUunnhE=";
       };
-      windows_sdk = pkgs.runCommand "windows_sdk" {
-        buildInputs = [
-          cli
-          download
-        ];
-      } ''
-        mkdir $out
-        windows_sdk --source ${download} --destination $out
-      '';
-    in rec {
-      defaultPackage = windows_sdk;
       devShell = pkgs.mkShell {
-        buildInputs = [
+        buildInputs = with pkgs; [
+          jq
+          msitools
           rust
+          xh
+					llvm_12
         ];
       };
     }

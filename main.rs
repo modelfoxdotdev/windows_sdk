@@ -1,17 +1,20 @@
 use clap::Parser;
 use std::path::PathBuf;
+use url::Url;
 
 #[derive(Parser)]
 struct Args {
-    #[clap(short, long)]
-    source: PathBuf,
-    #[clap(short, long)]
-    destination: PathBuf,
+	#[clap(long)]
+	manifest_url: Url,
+	#[clap(long)]
+	components: Vec<String>,
+	#[clap(long)]
+	cache: PathBuf,
+	#[clap(long)]
+	output: PathBuf,
 }
 
 fn main() {
-    let args = Args::parse();
-    if let Err(e) = windows_sdk::run(&args.source, &args.destination) {
-        eprintln!("{}", e);
-    }
+	let args = Args::parse();
+	windows_sdk::build(args.manifest_url, args.components, args.cache, args.output);
 }

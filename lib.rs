@@ -1,266 +1,317 @@
-use regex::bytes::Regex;
+use duct::cmd;
 use std::{
 	collections::{HashMap, HashSet},
-	fs, io,
-	os::unix::fs::symlink,
-	path::{Path, PathBuf},
+	path::PathBuf,
 };
+use tempfile::tempdir;
+use url::Url;
 use walkdir::WalkDir;
 
-/// Build the `toplevel/{clang,crt,sdk}/{lib,include}/` structure
-fn build_structure(toplevel: impl AsRef<Path>) -> io::Result<()> {
-	let toplevel = toplevel.as_ref();
-	if toplevel.exists() {
-		fs::remove_dir_all(toplevel)?;
-	}
-	fs::create_dir(toplevel)?;
-	let top_levels = ["clang", "crt", "sdk"];
-	for dir in top_levels {
-		let inner_levels = ["lib", "include"];
-		for inner in inner_levels {
-			let d = toplevel.join(dir).join(inner);
-			fs::create_dir_all(&d)?;
-		}
-	}
-	Ok(())
+#[derive(Debug, serde::Deserialize)]
+pub struct Manifest {
+	#[serde(rename = "manifestVersion")]
+	pub manifest_version: String,
+	#[serde(rename = "engineVersion")]
+	pub engine_version: String,
+	pub packages: Vec<Package>,
 }
 
-pub fn copy_dir_all(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io::Result<()> {
-	let mut stack = Vec::new();
-	stack.push(PathBuf::from(source.as_ref()));
+#[derive(Debug, serde::Deserialize)]
+pub struct Package {
+	pub id: String,
+	pub version: String,
+	#[serde(rename = "type")]
+	pub ty: Type,
+	#[serde(default)]
+	pub dependencies: HashMap<String, Dependency>,
+	#[serde(default)]
+	pub payloads: Vec<Payload>,
+}
 
-	let output_root = PathBuf::from(destination.as_ref());
-	let input_root = PathBuf::from(source.as_ref()).components().count();
+#[derive(Debug, serde::Deserialize)]
+#[serde(from = "DependencyRaw")]
+pub struct Dependency {
+	pub version: String,
+	pub ty: Option<DependencyType>,
+	pub chip: Option<DependencyChip>,
+}
 
-	while let Some(working_path) = stack.pop() {
-		// Generate a relative path
-		let src: PathBuf = working_path.components().skip(input_root).collect();
+impl From<DependencyRaw> for Dependency {
+	fn from(value: DependencyRaw) -> Self {
+		match value {
+			DependencyRaw::String(version) => Dependency {
+				version,
+				ty: Default::default(),
+				chip: Default::default(),
+			},
+			DependencyRaw::Map { version, ty, chip } => Dependency { version, ty, chip },
+		}
+	}
+}
 
-		// Create a destination if missing
-		let dest = if src.components().count() == 0 {
-			output_root.clone()
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum DependencyRaw {
+	String(String),
+	Map {
+		version: String,
+		#[serde(rename = "type")]
+		ty: Option<DependencyType>,
+		chip: Option<DependencyChip>,
+	},
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub enum DependencyType {
+	Optional,
+	Recommended,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub enum DependencyChip {
+	#[serde(rename = "x86", alias = "X86")]
+	X86,
+	#[serde(rename = "x64", alias = "X64")]
+	X64,
+	#[serde(rename = "arm")]
+	Arm,
+	#[serde(rename = "arm64")]
+	Arm64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+pub enum Type {
+	Component,
+	Exe,
+	Group,
+	Msi,
+	Msu,
+	Nupkg,
+	Product,
+	Vsix,
+	WindowsFeature,
+	Workload,
+	Zip,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct Payload {
+	#[serde(rename = "fileName")]
+	pub file_name: String,
+	pub sha256: String,
+	pub size: u64,
+	pub url: Url,
+}
+
+pub fn build(
+	manifest_url: Url,
+	components: Vec<String>,
+	cache_path: PathBuf,
+	output_path: PathBuf,
+) {
+	// Create the cache path if necessary.
+	if !cache_path.exists() {
+		std::fs::create_dir_all(&output_path).unwrap();
+	}
+	// Create a tempdir to extract to.
+	let extract_dir = tempdir().unwrap();
+	let extract_path = extract_dir.path();
+	// Clean and create the output path.
+	if output_path.exists() {
+		std::fs::remove_dir_all(&output_path).unwrap();
+	}
+	std::fs::create_dir_all(&output_path).unwrap();
+	let client = reqwest::blocking::Client::builder()
+		.timeout(None)
+		.build()
+		.unwrap();
+
+	// Load the manifest.
+	let manifest = reqwest::blocking::get(manifest_url)
+		.unwrap()
+		.bytes()
+		.unwrap();
+	let manifest: Manifest = serde_json::from_slice(&manifest).unwrap();
+
+	// Find the payloads for all recursive dependencies of the requested components.
+	#[derive(Debug)]
+	struct Download<'a> {
+		package_id: &'a str,
+		ty: Type,
+		file_name: &'a str,
+		url: &'a Url,
+	}
+	let mut package_ids = HashSet::new();
+	let mut downloads = Vec::new();
+	fn search<'a>(
+		manifest: &'a Manifest,
+		package_ids: &mut HashSet<&'a str>,
+		downloads: &mut Vec<Download<'a>>,
+		package_id: &'a str,
+	) {
+		if let Some(package) = manifest
+			.packages
+			.iter()
+			.find(|package| package.id == package_id)
+		{
+			package_ids.insert(package_id);
+			for payload in package.payloads.iter() {
+				downloads.push(Download {
+					package_id,
+					ty: package.ty,
+					file_name: &payload.file_name,
+					url: &payload.url,
+				});
+			}
+			for (id, dependency) in package.dependencies.iter() {
+				if !package_ids.contains(id.as_str()) && dependency.ty.is_none() {
+					search(manifest, package_ids, downloads, id);
+				}
+			}
+		}
+	}
+	for id in components.iter() {
+		search(&manifest, &mut package_ids, &mut downloads, id);
+	}
+
+	// Download the payloads and extract them.
+	for (i, download) in downloads.iter().enumerate() {
+		let download_cache_dir_path = cache_path.join(&download.package_id);
+		std::fs::create_dir_all(&download_cache_dir_path).unwrap();
+		let file_name = download.file_name.replace("\\", "/");
+		let download_cache_path = download_cache_dir_path.join(&file_name);
+		if !download_cache_path.exists() {
+			eprintln!(
+				"({} / {}) Downloading {} {}",
+				i,
+				downloads.len(),
+				download.package_id,
+				download.file_name,
+			);
+			let bytes = client
+				.get(download.url.to_owned())
+				.send()
+				.unwrap()
+				.bytes()
+				.unwrap();
+			std::fs::create_dir_all(download_cache_path.parent().unwrap()).unwrap();
+			std::fs::write(&download_cache_path, bytes).unwrap();
+		}
+		if file_name.ends_with(".msi") || download.ty == Type::Msi {
+			eprintln!(
+				"({} / {}) Extracting {}",
+				i,
+				downloads.len(),
+				download.file_name,
+			);
+			cmd!("msiextract", "-C", &extract_path, &download_cache_path)
+				.stdout_null()
+				.stderr_null()
+				.run()
+				.ok();
+		} else if download.ty == Type::Vsix {
+			eprintln!(
+				"({} / {}) Extracting {}",
+				i,
+				downloads.len(),
+				download.file_name,
+			);
+			let tempdir = tempdir().unwrap();
+			cmd!("unzip", &download_cache_path, "-d", tempdir.path())
+				.stdout_null()
+				.stderr_null()
+				.run()
+				.unwrap();
+			if let Ok(contents) = std::fs::read_dir(tempdir.path().join("Contents")) {
+				for entry in contents {
+					cmd!("cp", "-r", entry.unwrap().path(), &extract_path)
+						.run()
+						.unwrap();
+				}
+			}
 		} else {
-			output_root.join(&src)
-		};
-		if fs::metadata(&dest).is_err() {
-			fs::create_dir_all(&dest)?;
+			eprintln!(
+				"({} / {}) Skipping {}",
+				i,
+				downloads.len(),
+				download.file_name,
+			);
 		}
+	}
 
-		for entry in fs::read_dir(working_path)? {
-			let entry = entry?;
-			let path = entry.path();
-			if path.is_dir() {
-				stack.push(path);
+	// Lowercase all header and import library names.
+	let header_paths = || {
+		WalkDir::new(&extract_path).into_iter().filter_map(|entry| {
+			let entry = entry.unwrap();
+			if entry.path().extension().map(|e| e.to_str().unwrap()) == Some("h") {
+				Some(entry.path().to_owned())
 			} else {
-				match path.file_name() {
-					Some(filename) => {
-						let dest_path = dest.join(filename);
-						fs::copy(&path, &dest_path)?;
-					}
-					None => { /* nothing to do! */ }
+				None
+			}
+		})
+	};
+	let import_library_paths = || {
+		WalkDir::new(&extract_path).into_iter().filter_map(|entry| {
+			let entry = entry.unwrap();
+			match entry.path().extension().map(|e| e.to_str().unwrap()) {
+				Some("lib") | Some("Lib") => Some(entry.path().to_owned()),
+				_ => None,
+			}
+		})
+	};
+	for path in header_paths().chain(import_library_paths()) {
+		let name = path.file_name().unwrap();
+		let lowercase_name = name.to_ascii_lowercase();
+		if lowercase_name != name {
+			std::fs::rename(&path, path.parent().unwrap().join(lowercase_name)).unwrap();
+		}
+	}
+	// Copy headers to match references with different casing.
+	let headers: HashMap<String, PathBuf> = header_paths()
+		.map(|path| {
+			let file_name = path.file_name().unwrap().to_str().unwrap().to_owned();
+			(file_name, path)
+		})
+		.collect();
+	let include_regex = regex::bytes::Regex::new(r#"#include\s+(?:"|<)([^">]+)(?:"|>)?"#).unwrap();
+	for header_path in header_paths() {
+		let header_bytes = std::fs::read(header_path).unwrap();
+		for capture in include_regex.captures_iter(&header_bytes) {
+			let name = std::str::from_utf8(&capture[1]).unwrap();
+			if let Some(path) = headers.get(&name.to_lowercase()) {
+				let mut path = path.parent().unwrap().to_owned();
+				path.push(name);
+				if !path.exists() {
+					std::fs::write(path, &header_bytes).unwrap();
 				}
 			}
 		}
 	}
 
-	Ok(())
-}
-
-/// Copy the necessary folders from the source SDK directory tree to our tailored destination.
-fn copy_contents(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io::Result<()> {
-	// Set up reused paths
-	let source = source.as_ref();
-	let destination = destination.as_ref();
-	let sdk_ver = "10.0.19041.0";
-	let vc_tools_ver = "14.29.30133";
-	let llvm_version = "12.0.0";
-
-	// Source locations
-	let sdk_path_src = source.join("kits").join("10");
-	let sdk_includes_src = sdk_path_src.join("Include").join(sdk_ver);
-	let sdk_shared_src = sdk_includes_src.join("shared");
-	let sdk_ucrt_src = sdk_includes_src.join("ucrt");
-	let sdk_um_src = sdk_includes_src.join("um");
-	let sdk_libs_src = sdk_path_src.join("Lib").join(sdk_ver);
-	let sdk_x64_libs_fn = |subdir: &str| sdk_libs_src.join(subdir).join("x64");
-	let sdk_ucrt_libs_src = sdk_x64_libs_fn("ucrt");
-	let sdk_um_libs_src = sdk_x64_libs_fn("um");
-	let vc_tools_path_src = source.join("VC").join("Tools");
-	let vc_tools_includes_src = vc_tools_path_src
-		.join("MSVC")
-		.join(vc_tools_ver)
-		.join("include");
-	let vc_tools_clang_compat_src = vc_tools_path_src
-		.join("Llvm")
-		.join("x64")
-		.join("lib")
-		.join("clang")
-		.join(llvm_version)
-		.join("include");
-	let vc_tools_libs_src = vc_tools_path_src
-		.join("MSVC")
-		.join(vc_tools_ver)
-		.join("lib")
-		.join("x64");
-
-	// Destination locations
-	let sdk_includes_dst = destination.join("sdk").join("include");
-	let sdk_shared_dst = sdk_includes_dst.join("shared");
-	let sdk_ucrt_dst = sdk_includes_dst.join("ucrt");
-	let sdk_um_dst = sdk_includes_dst.join("um");
-	let sdk_libs_fn = |subdir: &str| destination.join("sdk").join("lib").join("x64").join(subdir);
-	let sdk_ucrt_libs_dst = sdk_libs_fn("ucrt");
-	let sdk_um_libs_dst = sdk_libs_fn("um");
-	let crt_dst = destination.join("crt");
-	let crt_includes_dst = crt_dst.join("include");
-	let crt_clang_compat_dst = destination.join("clang").join("include");
-	let crt_libs_dst = destination.join("clang").join("lib").join("x64");
-
-	let tasks = [
-		(&sdk_shared_src, &sdk_shared_dst),
-		(&sdk_ucrt_libs_src, &sdk_ucrt_libs_dst),
-		(&sdk_ucrt_src, &sdk_ucrt_dst),
-		(&sdk_um_libs_src, &sdk_um_libs_dst),
-		(&sdk_um_src, &sdk_um_dst),
-		(&vc_tools_clang_compat_src, &crt_clang_compat_dst),
-		(&vc_tools_includes_src, &crt_includes_dst),
-		(&vc_tools_libs_src, &crt_libs_dst),
-	];
-	for (source, target) in tasks {
-		copy_dir_all(source, target)?;
+	// Copy the result to the output path.
+	if extract_path
+		.join("Program Files")
+		.join("Windows Kits")
+		.exists()
+	{
+		cmd!(
+			"cp",
+			"-r",
+			extract_path.join("Program Files").join("Windows Kits"),
+			&output_path,
+		)
+		.run()
+		.unwrap();
 	}
-
-	Ok(())
-}
-
-/// Crawl through every include dir, add every single header to a big map.
-fn read_all_headers(toplevel: impl AsRef<Path>) -> io::Result<HashMap<String, PathBuf>> {
-	let toplevel = toplevel.as_ref();
-	let mut headers = HashMap::new();
-
-	for entry in WalkDir::new(toplevel) {
-		let entry = entry?;
-		let ftype = entry.file_type();
-		if ftype.is_file() {
-			let file_name = entry.file_name();
-			let file_name = file_name.to_str().unwrap().to_owned();
-			let ext = file_name.split('.').nth(1).unwrap_or("_");
-			if ext == "h" {
-				headers.insert(file_name, entry.path().to_owned());
-			}
-		}
+	if extract_path.join("VC").join("Tools").exists() {
+		std::fs::create_dir_all(output_path.join("VC")).unwrap();
+		cmd!(
+			"cp",
+			"-r",
+			extract_path.join("VC").join("Tools"),
+			output_path.join("VC"),
+		)
+		.run()
+		.unwrap();
 	}
-
-	Ok(headers)
-}
-
-/// Create a symlink to any non-lowercase filename in the path
-fn create_lowercase_symlinks(toplevel: impl AsRef<Path>) -> io::Result<()> {
-	let toplevel = toplevel.as_ref();
-	for entry in WalkDir::new(toplevel) {
-		let entry = entry?;
-		let ftype = entry.file_type();
-		if ftype.is_file() {
-			let orig = entry.file_name();
-			let orig = orig.to_str().expect("Filename contained invalid UTF-8");
-			let lowered = orig.to_lowercase();
-			if orig != lowered {
-				let source = fs::canonicalize(entry.path())?;
-				let mut target = source.clone();
-				target.pop();
-				target.push(lowered);
-				symlink(&source, &target)?;
-			}
-		}
-	}
-	Ok(())
-}
-
-/// Search files for includes with case issues, create any missing symlinks.
-fn symlink_case_mismatches(
-	toplevel: impl AsRef<Path>,
-	headers: HashMap<String, PathBuf>,
-) -> io::Result<()> {
-	let toplevel = toplevel.as_ref();
-
-	let sdk = toplevel.join("sdk");
-	for subdir in &[sdk.join("include").join("um"), sdk.join("lib")] {
-		create_lowercase_symlinks(subdir)?;
-	}
-
-	let regex = Regex::new(r#"#include\s+(?:"|<)([^">]+)(?:"|>)?"#).unwrap();
-
-	let mut expected = HashSet::new();
-	for entry in WalkDir::new(toplevel) {
-		let entry = entry?;
-		let ftype = entry.file_type();
-		if ftype.is_file() {
-			let contents = fs::read(entry.path())?;
-			for caps in regex.captures_iter(&contents) {
-				let name =
-					std::str::from_utf8(&caps[1]).expect("Include contains non-utf8 characters");
-				let name = match name.rfind('/') {
-					Some(i) => &name[i + 1..],
-					None => name,
-				};
-				expected.insert(name.to_owned());
-			}
-		}
-	}
-
-	for name in expected {
-		match headers.get(&name) {
-			Some(_) => { /* nothing to do! */ }
-			None => {
-				// is the base name all lowercase?
-				if name
-					.split('.')
-					.next()
-					.unwrap()
-					.chars()
-					.all(char::is_lowercase)
-				{
-					// search headers for the mixed-case version, build symlink to expected.
-					for (possible_header, path) in &headers {
-						let lowered = possible_header.to_lowercase();
-						if lowered == name {
-							let source = fs::canonicalize(path)?;
-							let mut target = source.clone();
-							target.pop();
-							target.push(name);
-							if !target.exists() {
-								symlink(source, target)?;
-							}
-							break;
-						}
-					}
-				} else {
-					//the headers should have a lowercase verison.  Build symlink to expected.
-					let lowered = name.to_lowercase();
-					if let Some(needle) = headers.get(&lowered) {
-						let source = fs::canonicalize(needle)?;
-						let mut target = source.clone();
-						target.pop();
-						target.push(name);
-						if !target.exists() {
-							symlink(source, target)?;
-						}
-					}
-				}
-			}
-		}
-	}
-	Ok(())
-}
-
-/// Build a tailored MSVC SDK from the full downloaded tree.
-pub fn run(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> io::Result<()> {
-	println!("Processing sdk...");
-	let source = source.as_ref();
-	let destination = destination.as_ref();
-	build_structure(destination)?;
-	copy_contents(source, destination)?;
-	symlink_case_mismatches(destination, read_all_headers(destination)?)?;
-	println!("All done!");
-	Ok(())
 }
