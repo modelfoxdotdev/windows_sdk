@@ -37,6 +37,7 @@
         ];
         propagatedBuildInputs = with pkgs; [
           msitools
+          unzip
         ];
         cargoSha256 = "sha256-kC0g3bAhHN+TmTTj1CZWBk9PmYpJTBzcd/B1zafS64E=";
       };
@@ -45,8 +46,8 @@
           jq
           msitools
           rust
+          unzip
           xh
-					llvm_12
         ];
       };
     }
