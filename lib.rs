@@ -208,7 +208,7 @@ pub fn build(
 				.stdout_null()
 				.stderr_null()
 				.run()
-				.ok();
+				.unwrap();
 		} else if download.ty == Type::Vsix {
 			eprintln!(
 				"({} / {}) Extracting {}",
