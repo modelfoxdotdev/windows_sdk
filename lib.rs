@@ -1,9 +1,12 @@
 use duct::cmd;
+use futures::{future::join_all, StreamExt};
+use rayon::prelude::*;
 use std::{
 	collections::{HashMap, HashSet},
 	path::PathBuf,
 };
 use tempfile::tempdir;
+use tokio::io::AsyncWriteExt;
 use url::Url;
 use walkdir::WalkDir;
 
@@ -122,10 +125,6 @@ pub fn build(
 	}
 	std::fs::create_dir_all(&output_path).unwrap();
 	eprintln!("Downloading manifest");
-	let client = reqwest::blocking::Client::builder()
-		.timeout(None)
-		.build()
-		.unwrap();
 
 	// Load the manifest.
 	let manifest = reqwest::blocking::get(manifest_url)
@@ -194,121 +193,149 @@ pub fn build(
 	}
 
 	// Download.
-	for (i, download) in downloads.iter().enumerate() {
-		let download_cache_dir_path = cache_path.join(&download.package_id);
-		if !download_cache_dir_path.exists() {
-			std::fs::create_dir_all(&download_cache_dir_path).unwrap();
-		}
-		let download_cache_path = download_cache_dir_path.join(&download.file_name);
-		if !download_cache_path.exists() {
-			eprintln!(
-				"({} / {}) Downloading {} {}",
-				i + 1,
-				downloads.len(),
-				download.package_id,
-				download.file_name,
-			);
-			let bytes = client
-				.get(download.url.to_owned())
-				.send()
-				.unwrap()
-				.bytes()
-				.unwrap();
-			std::fs::create_dir_all(download_cache_path.parent().unwrap()).unwrap();
-			std::fs::write(&download_cache_path, bytes).unwrap();
-		} else {
-			eprintln!(
-				"({} / {}) Cached {} {}",
-				i + 1,
-				downloads.len(),
-				download.package_id,
-				download.file_name,
-			);
-		}
-	}
+	let n = downloads.len();
+	tokio::runtime::Runtime::new().unwrap().block_on(join_all(
+		downloads.into_iter().enumerate().map(|(i, download)| {
+			let cache_path = cache_path.clone();
+			async move {
+				let download_cache_dir_path = cache_path.join(&download.package_id);
+				if !download_cache_dir_path.exists() {
+					tokio::fs::create_dir_all(&download_cache_dir_path)
+						.await
+						.unwrap();
+				}
+				let download_cache_path = download_cache_dir_path.join(&download.file_name);
+				if !download_cache_path.exists() {
+					eprintln!(
+						"({} / {}) Downloading {} {}",
+						i + 1,
+						n,
+						download.package_id,
+						download.file_name,
+					);
+					let mut stream = reqwest::get(download.url.to_owned())
+						.await
+						.unwrap()
+						.bytes_stream();
+					tokio::fs::create_dir_all(download_cache_path.parent().unwrap())
+						.await
+						.unwrap();
+					let mut file = tokio::fs::File::create(&download_cache_path).await.unwrap();
+					while let Some(chunk) = stream.next().await {
+						file.write_all(&chunk.unwrap()).await.unwrap();
+					}
+				} else {
+					eprintln!(
+						"({} / {}) Cached {} {}",
+						i + 1,
+						n,
+						download.package_id,
+						download.file_name,
+					);
+				}
+			}
+		}),
+	));
 
 	// Extract.
-	for (i, extraction) in extractions.iter().enumerate() {
-		let download_cache_dir_path = cache_path.join(&extraction.package_id);
-		let download_cache_path = download_cache_dir_path.join(&extraction.file_name);
-		eprintln!(
-			"({} / {}) Extracting {}",
-			i + 1,
-			extractions.len(),
-			extraction.file_name,
-		);
-		match extraction.ty {
-			ExtractionType::Msi => {
-				cmd!("msiextract", "-C", &extract_path, &download_cache_path)
-					.run()
-					.unwrap();
+	extractions
+		.par_iter()
+		.enumerate()
+		.for_each(|(i, extraction)| {
+			let download_cache_dir_path = cache_path.join(&extraction.package_id);
+			let download_cache_path = download_cache_dir_path.join(&extraction.file_name);
+			eprintln!(
+				"({} / {}) Extracting {}",
+				i + 1,
+				extractions.len(),
+				extraction.file_name,
+			);
+			match extraction.ty {
+				ExtractionType::Msi => {
+					cmd!("msiextract", "-C", &extract_path, &download_cache_path)
+						.run()
+						.unwrap();
+				}
+				ExtractionType::Vsix => {
+					let tempdir = tempdir().unwrap();
+					cmd!("unzip", "-qq", &download_cache_path, "-d", tempdir.path())
+						.run()
+						.unwrap();
+					if let Ok(contents) = std::fs::read_dir(tempdir.path().join("Contents")) {
+						for entry in contents {
+							cmd!("cp", "-r", entry.unwrap().path(), &extract_path)
+								.run()
+								.unwrap();
+						}
+					}
+				}
 			}
-			ExtractionType::Vsix => {
-				let tempdir = tempdir().unwrap();
-				cmd!("unzip", "-qq", &download_cache_path, "-d", tempdir.path())
-					.run()
-					.unwrap();
-				if let Ok(contents) = std::fs::read_dir(tempdir.path().join("Contents")) {
-					for entry in contents {
-						cmd!("cp", "-r", entry.unwrap().path(), &extract_path)
-							.run()
-							.unwrap();
+		});
+
+	// Lowercase all header and import library names.
+	let header_paths = || {
+		WalkDir::new(&extract_path)
+			.into_iter()
+			.filter_map(|entry| {
+				let entry = entry.unwrap();
+				let extension = entry.path().extension().map(|e| e.to_str().unwrap());
+				match extension {
+					Some("h") => Some(entry.path().to_owned()),
+					_ => None,
+				}
+			})
+			.collect::<Vec<_>>()
+	};
+	let import_library_paths = || {
+		WalkDir::new(&extract_path)
+			.into_iter()
+			.filter_map(|entry| {
+				let entry = entry.unwrap();
+				let extension = entry.path().extension().map(|e| e.to_str().unwrap());
+				match extension {
+					Some("lib") | Some("Lib") => Some(entry.path().to_owned()),
+					_ => None,
+				}
+			})
+			.collect::<Vec<_>>()
+	};
+	header_paths()
+		.iter()
+		.chain(import_library_paths().iter())
+		.for_each(|path| {
+			let name = path.file_name().unwrap();
+			let lowercase_name = name.to_ascii_lowercase();
+			if lowercase_name != name {
+				std::fs::rename(&path, path.parent().unwrap().join(lowercase_name)).unwrap();
+			}
+		});
+
+	// Copy headers to match references with different casing.
+	let mut headers = HashMap::new();
+	for header_path in header_paths() {
+		let file_name = header_path.file_name().unwrap().to_str().unwrap();
+		let lowercase_file_name = file_name.to_lowercase();
+		let entries = headers
+			.entry(lowercase_file_name)
+			.or_insert_with(HashSet::new);
+		entries.insert(header_path);
+	}
+	let include_regex = regex::bytes::Regex::new(r#"#include(\s+)(["<])([^">]+)([">])"#).unwrap();
+	header_paths().iter().for_each(|header_path| {
+		let header_bytes = std::fs::read(header_path).unwrap();
+		for capture in include_regex.captures_iter(&header_bytes) {
+			let name = std::str::from_utf8(&capture[3]).unwrap();
+			if let Some(paths) = headers.get(&name.to_lowercase()) {
+				for path in paths {
+					let mut path = path.parent().unwrap().to_owned();
+					path.push(name);
+					if !path.exists() {
+						std::fs::write(path, &header_bytes).unwrap();
 					}
 				}
 			}
 		}
-	}
-
-	// Lowercase all header and import library names.
-	let header_paths = || {
-		WalkDir::new(&extract_path).into_iter().filter_map(|entry| {
-			let entry = entry.unwrap();
-			let extension = entry.path().extension().map(|e| e.to_str().unwrap());
-			match extension {
-				Some("h") => Some(entry.path().to_owned()),
-				_ => None,
-			}
-		})
-	};
-	let import_library_paths = || {
-		WalkDir::new(&extract_path).into_iter().filter_map(|entry| {
-			let entry = entry.unwrap();
-			let extension = entry.path().extension().map(|e| e.to_str().unwrap());
-			match extension {
-				Some("lib") | Some("Lib") => Some(entry.path().to_owned()),
-				_ => None,
-			}
-		})
-	};
-	for path in header_paths().chain(import_library_paths()) {
-		let name = path.file_name().unwrap();
-		let lowercase_name = name.to_ascii_lowercase();
-		if lowercase_name != name {
-			std::fs::rename(&path, path.parent().unwrap().join(lowercase_name)).unwrap();
-		}
-	}
-
-	// Copy headers to match references with different casing.
-	let headers: HashMap<String, PathBuf> = header_paths()
-		.map(|path| {
-			let file_name = path.file_name().unwrap().to_str().unwrap().to_owned();
-			(file_name, path)
-		})
-		.collect();
-	let include_regex = regex::bytes::Regex::new(r#"#include(\s+)(["<])([^">]+)([">])"#).unwrap();
-	for header_path in header_paths() {
-		let header_bytes = std::fs::read(header_path).unwrap();
-		for capture in include_regex.captures_iter(&header_bytes) {
-			let name = std::str::from_utf8(&capture[3]).unwrap();
-			if let Some(path) = headers.get(&name.to_lowercase()) {
-				let mut path = path.parent().unwrap().to_owned();
-				path.push(name);
-				if !path.exists() {
-					std::fs::write(path, &header_bytes).unwrap();
-				}
-			}
-		}
-	}
+	});
 
 	// // Lowercase all includes in headers.
 	// let include_regex = regex::bytes::Regex::new(r#"#include(\s+)(["<])([^">]+)([">])"#).unwrap();
