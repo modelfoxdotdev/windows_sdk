@@ -263,17 +263,18 @@ pub fn build(
 	let header_paths = || {
 		WalkDir::new(&extract_path).into_iter().filter_map(|entry| {
 			let entry = entry.unwrap();
-			if entry.path().extension().map(|e| e.to_str().unwrap()) == Some("h") {
-				Some(entry.path().to_owned())
-			} else {
-				None
+			let extension = entry.path().extension().map(|e| e.to_str().unwrap());
+			match extension {
+				Some("h") => Some(entry.path().to_owned()),
+				_ => None,
 			}
 		})
 	};
 	let import_library_paths = || {
 		WalkDir::new(&extract_path).into_iter().filter_map(|entry| {
 			let entry = entry.unwrap();
-			match entry.path().extension().map(|e| e.to_str().unwrap()) {
+			let extension = entry.path().extension().map(|e| e.to_str().unwrap());
+			match extension {
 				Some("lib") | Some("Lib") => Some(entry.path().to_owned()),
 				_ => None,
 			}
@@ -286,6 +287,7 @@ pub fn build(
 			std::fs::rename(&path, path.parent().unwrap().join(lowercase_name)).unwrap();
 		}
 	}
+
 	// Copy headers to match references with different casing.
 	let headers: HashMap<String, PathBuf> = header_paths()
 		.map(|path| {
@@ -293,11 +295,11 @@ pub fn build(
 			(file_name, path)
 		})
 		.collect();
-	let include_regex = regex::bytes::Regex::new(r#"#include\s+(?:"|<)([^">]+)(?:"|>)?"#).unwrap();
+	let include_regex = regex::bytes::Regex::new(r#"#include(\s+)(["<])([^">]+)([">])"#).unwrap();
 	for header_path in header_paths() {
 		let header_bytes = std::fs::read(header_path).unwrap();
 		for capture in include_regex.captures_iter(&header_bytes) {
-			let name = std::str::from_utf8(&capture[1]).unwrap();
+			let name = std::str::from_utf8(&capture[3]).unwrap();
 			if let Some(path) = headers.get(&name.to_lowercase()) {
 				let mut path = path.parent().unwrap().to_owned();
 				path.push(name);
@@ -307,6 +309,22 @@ pub fn build(
 			}
 		}
 	}
+
+	// // Lowercase all includes in headers.
+	// let include_regex = regex::bytes::Regex::new(r#"#include(\s+)(["<])([^">]+)([">])"#).unwrap();
+	// for header_path in header_paths() {
+	// 	let header_bytes = std::fs::read(&header_path).unwrap();
+	// 	let header_bytes = include_regex.replace_all(&header_bytes, |captures: &regex::bytes::Captures| {
+	// 		let mut replacement = b"#include".to_vec();
+	// 		replacement.extend(&captures[1]);
+	// 		replacement.extend(&captures[2]);
+	// 		let name = std::str::from_utf8(&captures[3]).unwrap().to_lowercase();
+	// 		replacement.extend(name.as_bytes());
+	// 		replacement.extend(&captures[4]);
+	// 		replacement
+	// 	});
+	// 	std::fs::write(&header_path, &header_bytes).unwrap();
+	// }
 
 	// Copy the result to the output path.
 	if extract_path
