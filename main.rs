@@ -7,7 +7,7 @@ struct Args {
 	#[clap(long)]
 	manifest_url: Url,
 	#[clap(long)]
-	components: Vec<String>,
+	package_ids: Vec<String>,
 	#[clap(long)]
 	cache: PathBuf,
 	#[clap(long)]
@@ -16,5 +16,5 @@ struct Args {
 
 fn main() {
 	let args = Args::parse();
-	windows_sdk::build(args.manifest_url, args.components, args.cache, args.output);
+	windows_sdk::build(args.manifest_url, args.package_ids, args.cache, args.output);
 }

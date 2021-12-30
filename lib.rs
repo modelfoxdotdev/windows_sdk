@@ -105,7 +105,7 @@ pub struct Payload {
 
 pub fn build(
 	manifest_url: Url,
-	components: Vec<String>,
+	package_ids: Vec<String>,
 	cache_path: PathBuf,
 	output_path: PathBuf,
 ) {
@@ -121,6 +121,7 @@ pub fn build(
 		std::fs::remove_dir_all(&output_path).unwrap();
 	}
 	std::fs::create_dir_all(&output_path).unwrap();
+	eprintln!("Downloading manifest");
 	let client = reqwest::blocking::Client::builder()
 		.timeout(None)
 		.build()
@@ -135,55 +136,74 @@ pub fn build(
 
 	// Find the payloads for all recursive dependencies of the requested components.
 	#[derive(Debug)]
-	struct Download<'a> {
-		package_id: &'a str,
-		ty: Type,
-		file_name: &'a str,
-		url: &'a Url,
+	struct Download {
+		package_id: String,
+		file_name: String,
+		url: Url,
 	}
-	let mut package_ids = HashSet::new();
+	#[derive(Debug)]
+	struct Extraction {
+		package_id: String,
+		file_name: String,
+		ty: ExtractionType,
+	}
+	#[derive(Debug)]
+	enum ExtractionType {
+		Msi,
+		Vsix,
+	}
+	let mut package_ids = package_ids;
+	let mut seen_package_ids = HashSet::new();
 	let mut downloads = Vec::new();
-	fn search<'a>(
-		manifest: &'a Manifest,
-		package_ids: &mut HashSet<&'a str>,
-		downloads: &mut Vec<Download<'a>>,
-		package_id: &'a str,
-	) {
+	let mut extractions = Vec::new();
+	while let Some(package_id) = package_ids.pop() {
 		if let Some(package) = manifest
 			.packages
 			.iter()
 			.find(|package| package.id == package_id)
 		{
-			package_ids.insert(package_id);
+			seen_package_ids.insert(package_id.clone());
 			for payload in package.payloads.iter() {
+				let file_name = payload.file_name.replace("\\", "/");
 				downloads.push(Download {
-					package_id,
-					ty: package.ty,
-					file_name: &payload.file_name,
-					url: &payload.url,
+					package_id: package_id.clone(),
+					file_name: file_name.clone(),
+					url: payload.url.clone(),
 				});
+				let extraction_ty = if payload.file_name.ends_with(".msi") {
+					Some(ExtractionType::Msi)
+				} else if payload.file_name.ends_with(".vsix") {
+					Some(ExtractionType::Vsix)
+				} else {
+					None
+				};
+				if let Some(ty) = extraction_ty {
+					extractions.push(Extraction {
+						package_id: package_id.clone(),
+						file_name,
+						ty,
+					})
+				}
 			}
-			for (id, dependency) in package.dependencies.iter() {
-				if !package_ids.contains(id.as_str()) && dependency.ty.is_none() {
-					search(manifest, package_ids, downloads, id);
+			for (package_id, dependency) in package.dependencies.iter() {
+				if !seen_package_ids.contains(package_id) && dependency.ty.is_none() {
+					package_ids.push(package_id.clone());
 				}
 			}
 		}
 	}
-	for id in components.iter() {
-		search(&manifest, &mut package_ids, &mut downloads, id);
-	}
 
-	// Download the payloads and extract them.
+	// Download.
 	for (i, download) in downloads.iter().enumerate() {
 		let download_cache_dir_path = cache_path.join(&download.package_id);
-		std::fs::create_dir_all(&download_cache_dir_path).unwrap();
-		let file_name = download.file_name.replace("\\", "/");
-		let download_cache_path = download_cache_dir_path.join(&file_name);
+		if !download_cache_dir_path.exists() {
+			std::fs::create_dir_all(&download_cache_dir_path).unwrap();
+		}
+		let download_cache_path = download_cache_dir_path.join(&download.file_name);
 		if !download_cache_path.exists() {
 			eprintln!(
 				"({} / {}) Downloading {} {}",
-				i,
+				i + 1,
 				downloads.len(),
 				download.package_id,
 				download.file_name,
@@ -196,46 +216,46 @@ pub fn build(
 				.unwrap();
 			std::fs::create_dir_all(download_cache_path.parent().unwrap()).unwrap();
 			std::fs::write(&download_cache_path, bytes).unwrap();
-		}
-		if file_name.ends_with(".msi") || download.ty == Type::Msi {
-			eprintln!(
-				"({} / {}) Extracting {}",
-				i,
-				downloads.len(),
-				download.file_name,
-			);
-			cmd!("msiextract", "-C", &extract_path, &download_cache_path)
-				.stdout_null()
-				.stderr_null()
-				.run()
-				.unwrap();
-		} else if download.ty == Type::Vsix {
-			eprintln!(
-				"({} / {}) Extracting {}",
-				i,
-				downloads.len(),
-				download.file_name,
-			);
-			let tempdir = tempdir().unwrap();
-			cmd!("unzip", &download_cache_path, "-d", tempdir.path())
-				.stdout_null()
-				.stderr_null()
-				.run()
-				.unwrap();
-			if let Ok(contents) = std::fs::read_dir(tempdir.path().join("Contents")) {
-				for entry in contents {
-					cmd!("cp", "-r", entry.unwrap().path(), &extract_path)
-						.run()
-						.unwrap();
-				}
-			}
 		} else {
 			eprintln!(
-				"({} / {}) Skipping {}",
-				i,
+				"({} / {}) Cached {} {}",
+				i + 1,
 				downloads.len(),
+				download.package_id,
 				download.file_name,
 			);
+		}
+	}
+
+	// Extract.
+	for (i, extraction) in extractions.iter().enumerate() {
+		let download_cache_dir_path = cache_path.join(&extraction.package_id);
+		let download_cache_path = download_cache_dir_path.join(&extraction.file_name);
+		eprintln!(
+			"({} / {}) Extracting {}",
+			i + 1,
+			extractions.len(),
+			extraction.file_name,
+		);
+		match extraction.ty {
+			ExtractionType::Msi => {
+				cmd!("msiextract", "-C", &extract_path, &download_cache_path)
+					.run()
+					.unwrap();
+			}
+			ExtractionType::Vsix => {
+				let tempdir = tempdir().unwrap();
+				cmd!("unzip", "-qq", &download_cache_path, "-d", tempdir.path())
+					.run()
+					.unwrap();
+				if let Ok(contents) = std::fs::read_dir(tempdir.path().join("Contents")) {
+					for entry in contents {
+						cmd!("cp", "-r", entry.unwrap().path(), &extract_path)
+							.run()
+							.unwrap();
+					}
+				}
+			}
 		}
 	}
 
