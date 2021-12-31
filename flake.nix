@@ -39,7 +39,7 @@
           msitools
           unzip
         ];
-        cargoSha256 = "sha256-cZd66TiuVq/AZ5HJuAj8cTkx2B3pHsPX2j/TbUAIBrI=";
+        cargoSha256 = "sha256-XYs7FeJKaopAnDzsWhpLC+OJtJvw1l1rcoEiAq555vU=";
       };
       devShell = pkgs.mkShell {
         buildInputs = with pkgs; [
