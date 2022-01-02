@@ -32,18 +32,21 @@
         name = "windows_sdk";
         src = ./.;
         doCheck = false;
-        nativeBuildInputs = with pkgs; [
+        buildInputs = with pkgs; [
+          (lib.optional stdenv.isDarwin darwin.Security)
           libiconv
         ];
         propagatedBuildInputs = with pkgs; [
           msitools
           unzip
         ];
-        cargoSha256 = "sha256-XYs7FeJKaopAnDzsWhpLC+OJtJvw1l1rcoEiAq555vU=";
+        cargoSha256 = "sha256-HenIBLXFoY4y0kg2Pee8lJGv2xdyC+Go4tCCt2Fk4xc=";
       };
       devShell = pkgs.mkShell {
         buildInputs = with pkgs; [
+          (pkgs.lib.optional pkgs.stdenv.isDarwin pkgs.darwin.Security)
           jq
+          libiconv
           msitools
           rust
           unzip

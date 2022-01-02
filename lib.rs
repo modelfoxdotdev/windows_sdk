@@ -108,7 +108,7 @@ pub struct Payload {
 
 pub fn build(
 	manifest_url: Url,
-	package_ids: Vec<String>,
+	packages: Vec<String>,
 	cache_path: PathBuf,
 	output_path: PathBuf,
 ) {
@@ -151,17 +151,17 @@ pub fn build(
 		Msi,
 		Vsix,
 	}
-	let mut package_ids = package_ids;
-	let mut seen_package_ids = HashSet::new();
+	let mut packages = packages;
+	let mut seen_packages = HashSet::new();
 	let mut downloads = Vec::new();
 	let mut extractions = Vec::new();
-	while let Some(package_id) = package_ids.pop() {
+	while let Some(package_id) = packages.pop() {
 		if let Some(package) = manifest
 			.packages
 			.iter()
 			.find(|package| package.id == package_id)
 		{
-			seen_package_ids.insert(package_id.clone());
+			seen_packages.insert(package_id.clone());
 			for payload in package.payloads.iter() {
 				let file_name = payload.file_name.replace("\\", "/");
 				downloads.push(Download {
@@ -185,8 +185,8 @@ pub fn build(
 				}
 			}
 			for (package_id, dependency) in package.dependencies.iter() {
-				if !seen_package_ids.contains(package_id) && dependency.ty.is_none() {
-					package_ids.push(package_id.clone());
+				if !seen_packages.contains(package_id) && dependency.ty.is_none() {
+					packages.push(package_id.clone());
 				}
 			}
 		}
