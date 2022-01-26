@@ -16,9 +16,11 @@ path = "main.rs"
 
 [dependencies]
 clap = { version = "3", features = ["derive"] }
-futures = "0.3"
+digest = "0.10"
 duct = "0.13"
-hex = "0.4"
+futures = "0.3"
+hex = { version = "0.4", features = ["serde"] }
+indicatif = "0.16"
 rayon = "1.5"
 regex = "1.5"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls", "stream", "trust-dns"] }

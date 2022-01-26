@@ -1,7 +1,7 @@
 {
   inputs = {
     nixpkgs = {
-      url = "github:nixos/nixpkgs/nixos-unstable";
+      url = "github:nixos/nixpkgs";
     };
     flake-utils = {
       url = "github:numtide/flake-utils";
@@ -34,19 +34,19 @@
         doCheck = false;
         buildInputs = with pkgs; [
           (lib.optional stdenv.isDarwin darwin.Security)
-          libiconv
+          (lib.optional stdenv.isDarwin libiconv)
         ];
         propagatedBuildInputs = with pkgs; [
           msitools
           unzip
         ];
-        cargoSha256 = "sha256-HenIBLXFoY4y0kg2Pee8lJGv2xdyC+Go4tCCt2Fk4xc=";
+        cargoLock = { lockFile = ./Cargo.lock; };
       };
       devShell = pkgs.mkShell {
         buildInputs = with pkgs; [
-          (pkgs.lib.optional pkgs.stdenv.isDarwin pkgs.darwin.Security)
+          (lib.optional stdenv.isDarwin darwin.Security)
+          (lib.optional stdenv.isDarwin libiconv)
           jq
-          libiconv
           msitools
           rust
           unzip

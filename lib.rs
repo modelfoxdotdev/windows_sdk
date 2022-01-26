@@ -1,6 +1,8 @@
+use digest::Digest;
 use duct::cmd;
 use futures::{future::join_all, StreamExt};
-use rayon::prelude::*;
+use indicatif::{ProgressBar, ProgressStyle};
+use sha2::Sha256;
 use std::{
 	collections::{HashMap, HashSet},
 	path::PathBuf,
@@ -10,7 +12,29 @@ use tokio::io::AsyncWriteExt;
 use url::Url;
 use walkdir::WalkDir;
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Channel {
+	#[serde(rename = "channelItems")]
+	channel_items: Vec<ChannelItem>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ChannelItem {
+	id: String,
+	version: String,
+	#[serde(rename = "type")]
+	ty: ChannelItemType,
+	payloads: Option<Vec<Payload>>,
+}
+
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+enum ChannelItemType {
+	Manifest,
+	#[serde(other)]
+	Other,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Manifest {
 	#[serde(rename = "manifestVersion")]
 	pub manifest_version: String,
@@ -19,19 +43,19 @@ pub struct Manifest {
 	pub packages: Vec<Package>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Package {
 	pub id: String,
 	pub version: String,
 	#[serde(rename = "type")]
-	pub ty: Type,
+	pub ty: PackageType,
 	#[serde(default)]
 	pub dependencies: HashMap<String, Dependency>,
 	#[serde(default)]
 	pub payloads: Vec<Payload>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(from = "DependencyRaw")]
 pub struct Dependency {
 	pub version: String,
@@ -64,13 +88,13 @@ enum DependencyRaw {
 	},
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum DependencyType {
 	Optional,
 	Recommended,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum DependencyChip {
 	#[serde(rename = "x86", alias = "X86")]
 	X86,
@@ -82,8 +106,8 @@ pub enum DependencyChip {
 	Arm64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
-pub enum Type {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum PackageType {
 	Component,
 	Exe,
 	Group,
@@ -97,184 +121,198 @@ pub enum Type {
 	Zip,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Payload {
 	#[serde(rename = "fileName")]
 	pub file_name: String,
-	pub sha256: String,
+	#[serde(with = "hex::serde")]
+	pub sha256: [u8; 32],
 	pub size: u64,
 	pub url: Url,
 }
 
-pub fn build(
-	manifest_url: Url,
-	packages: Vec<String>,
-	cache_path: PathBuf,
-	output_path: PathBuf,
-) {
-	// Create the cache path if necessary.
-	if !cache_path.exists() {
-		std::fs::create_dir_all(&output_path).unwrap();
-	}
-	// Create a tempdir to extract to.
-	let extract_dir = tempdir().unwrap();
-	let extract_path = extract_dir.path();
-	// Clean and create the output path.
-	if output_path.exists() {
-		std::fs::remove_dir_all(&output_path).unwrap();
-	}
-	std::fs::create_dir_all(&output_path).unwrap();
-	eprintln!("Downloading manifest");
-
-	// Load the manifest.
-	let manifest = reqwest::blocking::get(manifest_url)
+pub fn download_manifest(major_version: String, output_path: PathBuf) {
+	let channel_url = format!("https://aka.ms/vs/{}/release/channel", major_version);
+	let channel: Channel = reqwest::blocking::get(channel_url).unwrap().json().unwrap();
+	let manifest_url = channel
+		.channel_items
+		.iter()
+		.find(|channel_item| channel_item.ty == ChannelItemType::Manifest)
 		.unwrap()
-		.bytes()
+		.payloads
+		.as_ref()
+		.unwrap()
+		.first()
+		.unwrap()
+		.url
+		.clone();
+	let manifest: Manifest = reqwest::blocking::get(manifest_url)
+		.unwrap()
+		.json()
 		.unwrap();
-	let manifest: Manifest = serde_json::from_slice(&manifest).unwrap();
+	let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+	std::fs::write(output_path, manifest_bytes).unwrap();
+}
 
-	// Find the payloads for all recursive dependencies of the requested components.
-	#[derive(Debug)]
-	struct Download {
-		package_id: String,
-		file_name: String,
-		url: Url,
-	}
-	#[derive(Debug)]
-	struct Extraction {
-		package_id: String,
-		file_name: String,
-		ty: ExtractionType,
-	}
-	#[derive(Debug)]
-	enum ExtractionType {
-		Msi,
-		Vsix,
-	}
-	let mut packages = packages;
-	let mut seen_packages = HashSet::new();
-	let mut downloads = Vec::new();
-	let mut extractions = Vec::new();
-	while let Some(package_id) = packages.pop() {
+pub fn choose_packages(manifest: PathBuf, package_ids: Vec<String>, output_path: PathBuf) {
+	// Load the manifest.
+	let manifest = std::fs::read(manifest).unwrap();
+	let manifest: Manifest = serde_json::from_slice(&manifest).unwrap();
+	// Find the payloads for all recursive dependencies of the requested packages.
+	let mut package_ids = package_ids;
+	let mut seen_package_ids = HashSet::new();
+	let mut packages = Vec::new();
+	while let Some(package_id) = package_ids.pop() {
 		if let Some(package) = manifest
 			.packages
 			.iter()
 			.find(|package| package.id == package_id)
 		{
-			seen_packages.insert(package_id.clone());
-			for payload in package.payloads.iter() {
-				let file_name = payload.file_name.replace("\\", "/");
-				downloads.push(Download {
-					package_id: package_id.clone(),
-					file_name: file_name.clone(),
-					url: payload.url.clone(),
-				});
-				let extraction_ty = if payload.file_name.ends_with(".msi") {
-					Some(ExtractionType::Msi)
-				} else if payload.file_name.ends_with(".vsix") {
-					Some(ExtractionType::Vsix)
-				} else {
-					None
-				};
-				if let Some(ty) = extraction_ty {
-					extractions.push(Extraction {
-						package_id: package_id.clone(),
-						file_name,
-						ty,
-					})
-				}
-			}
+			seen_package_ids.insert(package_id.clone());
+			packages.push(package);
 			for (package_id, dependency) in package.dependencies.iter() {
-				if !seen_packages.contains(package_id) && dependency.ty.is_none() {
-					packages.push(package_id.clone());
+				if !seen_package_ids.contains(package_id) && dependency.ty.is_none() {
+					package_ids.push(package_id.clone());
 				}
 			}
 		}
 	}
+	let packages_bytes = serde_json::to_vec_pretty(&packages).unwrap();
+	std::fs::write(output_path, &packages_bytes).unwrap();
+}
 
-	// Download.
-	let n = downloads.len();
-	tokio::runtime::Runtime::new().unwrap().block_on(join_all(
-		downloads.into_iter().enumerate().map(|(i, download)| {
+pub fn download_packages(packages_path: PathBuf, cache_path: PathBuf) {
+	// Read the packages.
+	let packages_bytes = std::fs::read(packages_path).unwrap();
+	let packages: Vec<Package> = serde_json::from_slice(&packages_bytes).unwrap();
+	// Create the cache path if necessary.
+	if !cache_path.exists() {
+		std::fs::create_dir_all(&cache_path).unwrap();
+	}
+	// Download the payloads from all the packages.
+	let total_size = packages
+		.iter()
+		.flat_map(|package| package.payloads.iter())
+		.map(|payload| payload.size)
+		.sum();
+	let progress_bar_style = ProgressStyle::default_bar()
+		.template("{msg}\n[{wide_bar}] {bytes} / {total_bytes}")
+		.progress_chars("=> ");
+	let progress_bar = ProgressBar::new(total_size).with_style(progress_bar_style);
+	tokio::runtime::Runtime::new()
+		.unwrap()
+		.block_on(join_all(packages.into_iter().map(|package| {
 			let cache_path = cache_path.clone();
+			let progress_bar = progress_bar.clone();
 			async move {
-				let download_cache_dir_path = cache_path.join(&download.package_id);
-				if !download_cache_dir_path.exists() {
-					tokio::fs::create_dir_all(&download_cache_dir_path)
+				progress_bar.set_message(format!("Downloading {}", package.id));
+				let package_cache_path = cache_path.join(&package.id);
+				if !package_cache_path.exists() {
+					tokio::fs::create_dir_all(&package_cache_path)
 						.await
 						.unwrap();
 				}
-				let download_cache_path = download_cache_dir_path.join(&download.file_name);
-				if !download_cache_path.exists() {
-					eprintln!(
-						"({} / {}) Downloading {} {}",
-						i + 1,
-						n,
-						download.package_id,
-						download.file_name,
-					);
-					let mut stream = reqwest::get(download.url.to_owned())
-						.await
-						.unwrap()
-						.bytes_stream();
-					tokio::fs::create_dir_all(download_cache_path.parent().unwrap())
-						.await
-						.unwrap();
-					let mut file = tokio::fs::File::create(&download_cache_path).await.unwrap();
-					while let Some(chunk) = stream.next().await {
-						file.write_all(&chunk.unwrap()).await.unwrap();
+				for payload in package.payloads {
+					let payload_cache_path =
+						package_cache_path.join(&payload.file_name.replace("\\", "/"));
+					let mut sha256 = Sha256::new();
+					if payload_cache_path.exists() {
+						let bytes = tokio::fs::read(payload_cache_path).await.unwrap();
+						sha256.update(&bytes);
+						progress_bar.inc(payload.size);
+					} else {
+						let mut stream = reqwest::get(payload.url.to_owned())
+							.await
+							.unwrap()
+							.bytes_stream();
+						tokio::fs::create_dir_all(payload_cache_path.parent().unwrap())
+							.await
+							.unwrap();
+						let mut file = tokio::fs::File::create(&payload_cache_path).await.unwrap();
+						while let Some(chunk) = stream.next().await {
+							let chunk = chunk.unwrap();
+							let chunk_size = chunk.len() as u64;
+							sha256.update(&chunk);
+							file.write_all(&chunk).await.unwrap();
+							progress_bar.inc(chunk_size);
+						}
 					}
-				} else {
-					eprintln!(
-						"({} / {}) Cached {} {}",
-						i + 1,
-						n,
-						download.package_id,
-						download.file_name,
-					);
+					let sha256 = sha256.finalize();
+					if sha256.as_slice() != payload.sha256 {
+						panic!("hash did not match for {} {}", package.id, payload.url);
+					}
 				}
 			}
-		}),
-	));
+		})));
+	progress_bar.finish();
+}
 
-	// Extract.
-	extractions
-		.par_iter()
-		.enumerate()
-		.for_each(|(i, extraction)| {
-			let download_cache_dir_path = cache_path.join(&extraction.package_id);
-			let download_cache_path = download_cache_dir_path.join(&extraction.file_name);
-			eprintln!(
-				"({} / {}) Extracting {}",
-				i + 1,
-				extractions.len(),
-				extraction.file_name,
-			);
-			match extraction.ty {
-				ExtractionType::Msi => {
-					cmd!("msiextract", "-C", &extract_path, &download_cache_path)
+pub fn extract_packages(packages_path: PathBuf, cache_path: PathBuf, output_path: PathBuf) {
+	// Read the packages.
+	let packages_bytes = std::fs::read(packages_path).unwrap();
+	let packages: Vec<Package> = serde_json::from_slice(&packages_bytes).unwrap();
+	// Clean and create the output path.
+	if output_path.exists() {
+		std::fs::remove_dir_all(&output_path).unwrap();
+	}
+	std::fs::create_dir_all(&output_path).unwrap();
+	let total_size = packages
+		.iter()
+		.flat_map(|package| package.payloads.iter())
+		.map(|payload| payload.size)
+		.sum();
+	let progress_bar_style = ProgressStyle::default_bar()
+		.template("{msg}\n[{wide_bar}] {bytes} / {total_bytes}")
+		.progress_chars("=> ");
+	let progress_bar = ProgressBar::new(total_size).with_style(progress_bar_style);
+	for package in packages {
+		progress_bar.set_message(format!("Extracting {}", package.id));
+		for payload in package.payloads {
+			let download_cache_dir_path = cache_path.join(&package.id);
+			let download_cache_path =
+				download_cache_dir_path.join(&payload.file_name.replace("\\", "/"));
+			enum ExtractionType {
+				Msi,
+				Vsix,
+			}
+			let extraction_type = if payload.file_name.ends_with(".msi") {
+				Some(ExtractionType::Msi)
+			} else if payload.file_name.ends_with(".vsix") {
+				Some(ExtractionType::Vsix)
+			} else {
+				None
+			};
+			match extraction_type {
+				None => {}
+				Some(ExtractionType::Msi) => {
+					cmd!("msiextract", "-C", &output_path, &download_cache_path)
+						.stderr_null()
+						.stdout_null()
 						.run()
 						.unwrap();
 				}
-				ExtractionType::Vsix => {
+				Some(ExtractionType::Vsix) => {
 					let tempdir = tempdir().unwrap();
 					cmd!("unzip", "-qq", &download_cache_path, "-d", tempdir.path())
-						.run()
+						.read()
 						.unwrap();
 					if let Ok(contents) = std::fs::read_dir(tempdir.path().join("Contents")) {
 						for entry in contents {
-							cmd!("cp", "-r", entry.unwrap().path(), &extract_path)
+							cmd!("cp", "-r", entry.unwrap().path(), &output_path)
 								.run()
 								.unwrap();
 						}
 					}
 				}
 			}
-		});
+			progress_bar.inc(payload.size);
+		}
+	}
+	progress_bar.finish();
 
 	// Lowercase all header and import library names.
 	let header_paths = || {
-		WalkDir::new(&extract_path)
+		WalkDir::new(&output_path)
 			.into_iter()
 			.filter_map(|entry| {
 				let entry = entry.unwrap();
@@ -287,7 +325,7 @@ pub fn build(
 			.collect::<Vec<_>>()
 	};
 	let import_library_paths = || {
-		WalkDir::new(&extract_path)
+		WalkDir::new(&output_path)
 			.into_iter()
 			.filter_map(|entry| {
 				let entry = entry.unwrap();
@@ -352,31 +390,4 @@ pub fn build(
 	// 	});
 	// 	std::fs::write(&header_path, &header_bytes).unwrap();
 	// }
-
-	// Copy the result to the output path.
-	if extract_path
-		.join("Program Files")
-		.join("Windows Kits")
-		.exists()
-	{
-		cmd!(
-			"cp",
-			"-r",
-			extract_path.join("Program Files").join("Windows Kits"),
-			&output_path,
-		)
-		.run()
-		.unwrap();
-	}
-	if extract_path.join("VC").join("Tools").exists() {
-		std::fs::create_dir_all(output_path.join("VC")).unwrap();
-		cmd!(
-			"cp",
-			"-r",
-			extract_path.join("VC").join("Tools"),
-			output_path.join("VC"),
-		)
-		.run()
-		.unwrap();
-	}
 }
