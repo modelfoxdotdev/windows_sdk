@@ -1,6 +1,7 @@
 use digest::Digest;
 use duct::cmd;
 use futures::{future::join_all, StreamExt};
+use indexmap::IndexMap;
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::Sha256;
 use std::{
@@ -50,7 +51,7 @@ pub struct Package {
 	#[serde(rename = "type")]
 	pub ty: PackageType,
 	#[serde(default)]
-	pub dependencies: HashMap<String, Dependency>,
+	pub dependencies: IndexMap<String, Dependency>,
 	#[serde(default)]
 	pub payloads: Vec<Payload>,
 }
@@ -159,20 +160,26 @@ pub fn choose_packages(manifest: PathBuf, package_ids: Vec<String>, output_path:
 	let manifest = std::fs::read(manifest).unwrap();
 	let manifest: Manifest = serde_json::from_slice(&manifest).unwrap();
 	// Find the payloads for all recursive dependencies of the requested packages.
-	let mut package_ids = package_ids;
-	let mut seen_package_ids = HashSet::new();
+	let mut package_id_queue = package_ids
+		.iter()
+		.map(|package_id| package_id.to_owned())
+		.collect::<Vec<_>>();
+	let mut seen_package_ids = package_ids
+		.iter()
+		.map(|package_id| package_id.to_owned())
+		.collect::<HashSet<_>>();
 	let mut packages = Vec::new();
-	while let Some(package_id) = package_ids.pop() {
-		if let Some(package) = manifest
+	while let Some(package_id) = package_id_queue.pop() {
+		for package in manifest
 			.packages
 			.iter()
-			.find(|package| package.id == package_id)
+			.filter(|package| package.id.eq_ignore_ascii_case(&package_id))
 		{
-			seen_package_ids.insert(package_id.clone());
 			packages.push(package);
-			for (package_id, dependency) in package.dependencies.iter() {
-				if !seen_package_ids.contains(package_id) && dependency.ty.is_none() {
-					package_ids.push(package_id.clone());
+			for (id, dependency) in package.dependencies.iter() {
+				if !seen_package_ids.contains(&id.to_ascii_lowercase()) && dependency.ty.is_none() {
+					package_id_queue.push(id.to_owned());
+					seen_package_ids.insert(id.to_ascii_lowercase());
 				}
 			}
 		}

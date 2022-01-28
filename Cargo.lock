@@ -545,6 +545,7 @@ checksum = "282a6247722caba404c065016bbfa522806e51714c34f5dfc3e4a3a46fcb4223"
 dependencies = [
  "autocfg",
  "hashbrown",
+ "serde",
 ]
 
 [[package]]
@@ -1632,6 +1633,7 @@ dependencies = [
  "duct",
  "futures",
  "hex",
+ "indexmap",
  "indicatif",
  "rayon",
  "regex",
