@@ -14,8 +14,8 @@ struct Args {
 
 #[derive(Parser)]
 enum Subcommand {
-	#[clap(name = "get-manifest-url")]
-	GetManifestUrl(GetManifestUrlArgs),
+	#[clap(name = "get-manifest-urls")]
+	GetManifestUrls(GetManifestUrlsArgs),
 	#[clap(name = "download-manifest")]
 	DownloadManifest(DownloadManifestArgs),
 	#[clap(name = "choose-packages")]
@@ -27,7 +27,7 @@ enum Subcommand {
 }
 
 #[derive(Parser)]
-struct GetManifestUrlArgs {
+struct GetManifestUrlsArgs {
 	#[clap(long)]
 	major_version: String,
 }
@@ -36,6 +36,8 @@ struct GetManifestUrlArgs {
 struct DownloadManifestArgs {
 	#[clap(long)]
 	manifest_url: Url,
+	#[clap(long)]
+	sha256: String,
 	#[clap(long)]
 	output: PathBuf,
 }
@@ -71,11 +73,11 @@ struct ExtractPackagesArgs {
 fn main() {
 	let args = Args::parse();
 	match args.subcommand {
-		Subcommand::GetManifestUrl(args) => {
-			windows_sdk::get_manifest_url(args.major_version);
+		Subcommand::GetManifestUrls(args) => {
+			windows_sdk::get_manifest_urls(args.major_version);
 		}
 		Subcommand::DownloadManifest(args) => {
-			windows_sdk::download_manifest(args.manifest_url, args.output);
+			windows_sdk::download_manifest(args.manifest_url, args.sha256, args.output);
 		}
 		Subcommand::ChoosePackages(args) => {
 			windows_sdk::choose_packages(args.manifest, args.packages, args.output);

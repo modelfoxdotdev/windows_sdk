@@ -132,30 +132,43 @@ pub struct Payload {
 	pub url: Url,
 }
 
-pub fn get_manifest_url(major_version: String) {
+pub fn get_manifest_urls(major_version: String) {
 	let channel_url = format!("https://aka.ms/vs/{}/release/channel", major_version);
 	let channel: Channel = reqwest::blocking::get(channel_url).unwrap().json().unwrap();
-	let manifest_payload = channel
+	for manifest_channel_item in channel
 		.channel_items
 		.iter()
-		.find(|channel_item| channel_item.ty == ChannelItemType::Manifest)
-		.unwrap()
-		.payloads
-		.as_ref()
-		.unwrap()
-		.first()
-		.unwrap();
-	println!("URL {}", manifest_payload.url);
-	println!("SHA256 {}", hex::encode(manifest_payload.sha256));
+		.filter(|channel_item| channel_item.ty == ChannelItemType::Manifest)
+	{
+		let manifest_payload = manifest_channel_item
+			.payloads
+			.as_ref()
+			.unwrap()
+			.first()
+			.unwrap();
+		println!(
+			"{} {}",
+			manifest_payload.url,
+			hex::encode(manifest_payload.sha256)
+		);
+	}
 }
 
-pub fn download_manifest(manifest_url: Url, output_path: PathBuf) {
+pub fn download_manifest(manifest_url: Url, sha256: String, output_path: PathBuf) {
 	let manifest: Manifest = reqwest::blocking::get(manifest_url)
 		.unwrap()
 		.json()
 		.unwrap();
 	let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
-	std::fs::write(output_path, manifest_bytes).unwrap();
+	let sha256 = hex::decode(sha256).unwrap();
+	if Sha256::new_with_prefix(&manifest_bytes)
+		.finalize()
+		.as_slice()
+		!= sha256
+	{
+		panic!("hash did not match");
+	}
+	std::fs::write(output_path, &manifest_bytes).unwrap();
 }
 
 pub fn choose_packages(manifest: PathBuf, package_ids: Vec<String>, output_path: PathBuf) {
