@@ -155,11 +155,10 @@ pub fn get_manifest_urls(major_version: String) {
 }
 
 pub fn download_manifest(manifest_url: Url, sha256: String, output_path: PathBuf) {
-	let manifest: Manifest = reqwest::blocking::get(manifest_url)
+	let manifest_bytes = reqwest::blocking::get(manifest_url)
 		.unwrap()
-		.json()
+		.bytes()
 		.unwrap();
-	let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
 	let sha256 = hex::decode(sha256).unwrap();
 	if Sha256::new_with_prefix(&manifest_bytes)
 		.finalize()
