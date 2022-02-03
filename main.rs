@@ -1,5 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
+use url::Url;
 
 #[derive(Parser)]
 #[clap(
@@ -13,6 +14,8 @@ struct Args {
 
 #[derive(Parser)]
 enum Subcommand {
+	#[clap(name = "get-manifest-url")]
+	GetManifestUrl(GetManifestUrlArgs),
 	#[clap(name = "download-manifest")]
 	DownloadManifest(DownloadManifestArgs),
 	#[clap(name = "choose-packages")]
@@ -24,9 +27,15 @@ enum Subcommand {
 }
 
 #[derive(Parser)]
-struct DownloadManifestArgs {
+struct GetManifestUrlArgs {
 	#[clap(long)]
 	major_version: String,
+}
+
+#[derive(Parser)]
+struct DownloadManifestArgs {
+	#[clap(long)]
+	manifest_url: Url,
 	#[clap(long)]
 	output: PathBuf,
 }
@@ -62,8 +71,11 @@ struct ExtractPackagesArgs {
 fn main() {
 	let args = Args::parse();
 	match args.subcommand {
+		Subcommand::GetManifestUrl(args) => {
+			windows_sdk::get_manifest_url(args.major_version);
+		}
 		Subcommand::DownloadManifest(args) => {
-			windows_sdk::download_manifest(args.major_version, args.output);
+			windows_sdk::download_manifest(args.manifest_url, args.output);
 		}
 		Subcommand::ChoosePackages(args) => {
 			windows_sdk::choose_packages(args.manifest, args.packages, args.output);

@@ -132,10 +132,10 @@ pub struct Payload {
 	pub url: Url,
 }
 
-pub fn download_manifest(major_version: String, output_path: PathBuf) {
+pub fn get_manifest_url(major_version: String) {
 	let channel_url = format!("https://aka.ms/vs/{}/release/channel", major_version);
 	let channel: Channel = reqwest::blocking::get(channel_url).unwrap().json().unwrap();
-	let manifest_url = channel
+	let manifest_payload = channel
 		.channel_items
 		.iter()
 		.find(|channel_item| channel_item.ty == ChannelItemType::Manifest)
@@ -144,9 +144,12 @@ pub fn download_manifest(major_version: String, output_path: PathBuf) {
 		.as_ref()
 		.unwrap()
 		.first()
-		.unwrap()
-		.url
-		.clone();
+		.unwrap();
+	println!("URL {}", manifest_payload.url);
+	println!("SHA256 {}", hex::encode(manifest_payload.sha256));
+}
+
+pub fn download_manifest(manifest_url: Url, output_path: PathBuf) {
 	let manifest: Manifest = reqwest::blocking::get(manifest_url)
 		.unwrap()
 		.json()
@@ -203,7 +206,7 @@ pub fn download_packages(packages_path: PathBuf, cache_path: PathBuf) {
 		.map(|payload| payload.size)
 		.sum();
 	let progress_bar_style = ProgressStyle::default_bar()
-		.template("{msg}\n[{wide_bar}] {bytes} / {total_bytes}")
+		.template("[{wide_bar}] {bytes} / {total_bytes}")
 		.progress_chars("=> ");
 	let progress_bar = ProgressBar::new(total_size).with_style(progress_bar_style);
 	tokio::runtime::Runtime::new()
@@ -212,30 +215,24 @@ pub fn download_packages(packages_path: PathBuf, cache_path: PathBuf) {
 			let cache_path = cache_path.clone();
 			let progress_bar = progress_bar.clone();
 			async move {
-				progress_bar.set_message(format!("Downloading {}", package.id));
-				let package_cache_path = cache_path.join(&package.id);
-				if !package_cache_path.exists() {
-					tokio::fs::create_dir_all(&package_cache_path)
-						.await
-						.unwrap();
-				}
 				for payload in package.payloads {
-					let payload_cache_path =
-						package_cache_path.join(&payload.file_name.replace("\\", "/"));
-					let mut sha256 = Sha256::new();
+					let payload_cache_path = cache_path.join(hex::encode(payload.sha256));
 					if payload_cache_path.exists() {
 						let bytes = tokio::fs::read(payload_cache_path).await.unwrap();
-						sha256.update(&bytes);
 						progress_bar.inc(payload.size);
+						let mut sha256 = Sha256::new();
+						sha256.update(&bytes);
+						let sha256 = sha256.finalize();
+						if sha256.as_slice() != payload.sha256 {
+							panic!("hash did not match for cached payload {}", payload.url,);
+						}
 					} else {
 						let mut stream = reqwest::get(payload.url.to_owned())
 							.await
 							.unwrap()
 							.bytes_stream();
-						tokio::fs::create_dir_all(payload_cache_path.parent().unwrap())
-							.await
-							.unwrap();
 						let mut file = tokio::fs::File::create(&payload_cache_path).await.unwrap();
+						let mut sha256 = Sha256::new();
 						while let Some(chunk) = stream.next().await {
 							let chunk = chunk.unwrap();
 							let chunk_size = chunk.len() as u64;
@@ -243,10 +240,10 @@ pub fn download_packages(packages_path: PathBuf, cache_path: PathBuf) {
 							file.write_all(&chunk).await.unwrap();
 							progress_bar.inc(chunk_size);
 						}
-					}
-					let sha256 = sha256.finalize();
-					if sha256.as_slice() != payload.sha256 {
-						panic!("hash did not match for {} {}", package.id, payload.url);
+						let sha256 = sha256.finalize();
+						if sha256.as_slice() != payload.sha256 {
+							panic!("hash did not match for downloaded payload {}", payload.url,);
+						}
 					}
 				}
 			}
@@ -269,15 +266,23 @@ pub fn extract_packages(packages_path: PathBuf, cache_path: PathBuf, output_path
 		.map(|payload| payload.size)
 		.sum();
 	let progress_bar_style = ProgressStyle::default_bar()
-		.template("{msg}\n[{wide_bar}] {bytes} / {total_bytes}")
+		.template("[{wide_bar}] {bytes} / {total_bytes}")
 		.progress_chars("=> ");
 	let progress_bar = ProgressBar::new(total_size).with_style(progress_bar_style);
 	for package in packages {
-		progress_bar.set_message(format!("Extracting {}", package.id));
-		for payload in package.payloads {
-			let download_cache_dir_path = cache_path.join(&package.id);
-			let download_cache_path =
-				download_cache_dir_path.join(&payload.file_name.replace("\\", "/"));
+		let package_tempdir = tempdir().unwrap();
+		for payload in package.payloads.iter() {
+			let payload_cache_path = cache_path.join(hex::encode(payload.sha256));
+			let payload_tempdir_path = package_tempdir
+				.path()
+				.join(payload.file_name.replace("\\", "/"));
+			std::fs::create_dir_all(payload_tempdir_path.parent().unwrap()).unwrap();
+			std::fs::copy(payload_cache_path, payload_tempdir_path).unwrap();
+		}
+		for payload in package.payloads.iter() {
+			let payload_tempdir_path = package_tempdir
+				.path()
+				.join(payload.file_name.replace("\\", "/"));
 			enum ExtractionType {
 				Msi,
 				Vsix,
@@ -292,18 +297,24 @@ pub fn extract_packages(packages_path: PathBuf, cache_path: PathBuf, output_path
 			match extraction_type {
 				None => {}
 				Some(ExtractionType::Msi) => {
-					cmd!("msiextract", "-C", &output_path, &download_cache_path)
+					cmd!("msiextract", "-C", &output_path, &payload_tempdir_path)
 						.stderr_null()
 						.stdout_null()
 						.run()
 						.unwrap();
 				}
 				Some(ExtractionType::Vsix) => {
-					let tempdir = tempdir().unwrap();
-					cmd!("unzip", "-qq", &download_cache_path, "-d", tempdir.path())
-						.read()
-						.unwrap();
-					if let Ok(contents) = std::fs::read_dir(tempdir.path().join("Contents")) {
+					let unzip_tempdir = tempdir().unwrap();
+					cmd!(
+						"unzip",
+						"-qq",
+						&payload_tempdir_path,
+						"-d",
+						unzip_tempdir.path()
+					)
+					.read()
+					.unwrap();
+					if let Ok(contents) = std::fs::read_dir(unzip_tempdir.path().join("Contents")) {
 						for entry in contents {
 							cmd!("cp", "-r", entry.unwrap().path(), &output_path)
 								.run()
